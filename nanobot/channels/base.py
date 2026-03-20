@@ -104,7 +104,7 @@ class BaseChannel(ABC):
             sender_id: The sender's identifier.
             chat_id: The chat/channel identifier.
             content: Message text content.
-            media: Optional list of media URLs.
+            media: Optional list of local filesystem paths to images (embedded as vision input).
             metadata: Optional channel-specific metadata.
             session_key: Optional session key override (e.g. thread-scoped sessions).
         """

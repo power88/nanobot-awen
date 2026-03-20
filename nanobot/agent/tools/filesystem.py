@@ -1,10 +1,40 @@
 """File system tools: read, write, edit, list."""
 
 import difflib
+import json
+import mimetypes
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
+from nanobot.utils.helpers import detect_image_mime
+
+READ_FILE_IMAGE_MARKER = "__NANOBOT_READ_FILE_IMAGE_V1__\n"
+_READ_FILE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
+
+
+def pack_read_file_image_payload(mime: str, path: Path) -> str:
+    """Serialize image hand-off for AgentLoop vision pass (not shown to the model as raw pixels)."""
+    return READ_FILE_IMAGE_MARKER + json.dumps(
+        {"mime": mime, "path": str(path)},
+        ensure_ascii=False,
+    )
+
+
+def unpack_read_file_image_payload(s: str) -> tuple[str, str] | None:
+    """Return (mime, path) if s is a packed read_file image payload."""
+    if not s.startswith(READ_FILE_IMAGE_MARKER):
+        return None
+    try:
+        d = json.loads(s[len(READ_FILE_IMAGE_MARKER) :])
+        mime, pth = d["mime"], d["path"]
+        if isinstance(mime, str) and isinstance(pth, str):
+            return mime, pth
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return None
 
 
 def _resolve_path(
@@ -33,6 +63,61 @@ def _is_under(path: Path, directory: Path) -> bool:
         return False
 
 
+# Stable Latin / id tail often survives when models mangle CJK in the middle of a filename
+# (e.g. pop_2025…JHYQ_6425769.jpg → pop_2025йװTJHYQ_6425769.jpg).
+_RE_FILE_TAIL_ID = re.compile(
+    r"([A-Za-z0-9][A-Za-z0-9_-]{0,120}_\d{4,}\.[A-Za-z0-9]{1,10})$"
+)
+_RE_FILE_NUM_EXT = re.compile(r"(\d{4,}\.[A-Za-z0-9]{1,10})$")
+
+
+def _disambiguate_missing_file(resolved: Path) -> Path | None:
+    """If resolved path is missing, find a unique real file in the same directory.
+
+    LLM tool arguments often corrupt non-ASCII filename segments; matching on an
+    ASCII filename tail (id_suffix.ext) recovers the intended file when unambiguous.
+    """
+    if resolved.is_file():
+        return resolved
+    parent = resolved.parent
+    basename = resolved.name
+    if not parent.is_dir():
+        return None
+
+    nfc_name = unicodedata.normalize("NFC", basename)
+    if nfc_name != basename:
+        cand = parent / nfc_name
+        if cand.is_file():
+            return cand
+
+    def _unique_file(paths: list[Path]) -> Path | None:
+        files = [p for p in paths if p.is_file()]
+        if len(files) == 1:
+            return files[0]
+        if len(files) > 1:
+            names = [p.name for p in files]
+            hit = difflib.get_close_matches(basename, names, n=1, cutoff=0.34)
+            if hit:
+                return parent / hit[0]
+        return None
+
+    m = _RE_FILE_TAIL_ID.search(basename)
+    if m:
+        tail = m.group(1)
+        found = _unique_file(list(parent.glob(f"*{tail}")))
+        if found:
+            return found
+
+    m2 = _RE_FILE_NUM_EXT.search(basename)
+    if m2:
+        num_ext = m2.group(1)
+        found = _unique_file(list(parent.glob(f"*{num_ext}")))
+        if found:
+            return found
+
+    return None
+
+
 class _FsTool(Tool):
     """Shared base for filesystem tools — common init and path resolution."""
 
@@ -48,6 +133,14 @@ class _FsTool(Tool):
 
     def _resolve(self, path: str) -> Path:
         return _resolve_path(path, self._workspace, self._allowed_dir, self._extra_allowed_dirs)
+
+    def _resolve_existing_file(self, path: str) -> Path:
+        """Like _resolve, but recover from garbled basename when exactly one file matches."""
+        fp = self._resolve(path)
+        if fp.is_file():
+            return fp
+        alt = _disambiguate_missing_file(fp)
+        return alt if alt is not None else fp
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +161,10 @@ class ReadFileTool(_FsTool):
     def description(self) -> str:
         return (
             "Read the contents of a file. Returns numbered lines. "
-            "Use offset and limit to paginate through large files."
+            "Use offset and limit to paginate through large files. "
+            "For image files (.png, .jpg, etc.) returns a vision summary when the model supports images. "
+            "If non-ASCII characters in the path were mangled, the same directory is searched for a "
+            "unique file matching the trailing id pattern (e.g. *_6425769.jpg)."
         )
 
     @property
@@ -93,11 +189,23 @@ class ReadFileTool(_FsTool):
 
     async def execute(self, path: str, offset: int = 1, limit: int | None = None, **kwargs: Any) -> str:
         try:
-            fp = self._resolve(path)
+            fp = self._resolve_existing_file(path)
             if not fp.exists():
                 return f"Error: File not found: {path}"
             if not fp.is_file():
                 return f"Error: Not a file: {path}"
+
+            with fp.open("rb") as bf:
+                head = bf.read(32)
+            mime = detect_image_mime(head) or mimetypes.guess_type(str(fp))[0]
+            if mime and mime.startswith("image/"):
+                size = fp.stat().st_size
+                if size > _READ_FILE_IMAGE_MAX_BYTES:
+                    return (
+                        f"Error: Image too large ({size} bytes) for analysis; "
+                        f"max {_READ_FILE_IMAGE_MAX_BYTES}."
+                    )
+                return pack_read_file_image_payload(mime, fp.resolve())
 
             all_lines = fp.read_text(encoding="utf-8").splitlines()
             total = len(all_lines)
@@ -239,7 +347,7 @@ class EditFileTool(_FsTool):
         replace_all: bool = False, **kwargs: Any,
     ) -> str:
         try:
-            fp = self._resolve(path)
+            fp = self._resolve_existing_file(path)
             if not fp.exists():
                 return f"Error: File not found: {path}"
 
