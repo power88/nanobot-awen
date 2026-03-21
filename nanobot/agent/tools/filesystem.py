@@ -1,7 +1,6 @@
 """File system tools: read, write, edit, list."""
 
 import difflib
-import json
 import mimetypes
 import re
 import unicodedata
@@ -9,32 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
-from nanobot.utils.helpers import detect_image_mime
-
-READ_FILE_IMAGE_MARKER = "__NANOBOT_READ_FILE_IMAGE_V1__\n"
-_READ_FILE_IMAGE_MAX_BYTES = 12 * 1024 * 1024
-
-
-def pack_read_file_image_payload(mime: str, path: Path) -> str:
-    """Serialize image hand-off for AgentLoop vision pass (not shown to the model as raw pixels)."""
-    return READ_FILE_IMAGE_MARKER + json.dumps(
-        {"mime": mime, "path": str(path)},
-        ensure_ascii=False,
-    )
-
-
-def unpack_read_file_image_payload(s: str) -> tuple[str, str] | None:
-    """Return (mime, path) if s is a packed read_file image payload."""
-    if not s.startswith(READ_FILE_IMAGE_MARKER):
-        return None
-    try:
-        d = json.loads(s[len(READ_FILE_IMAGE_MARKER) :])
-        mime, pth = d["mime"], d["path"]
-        if isinstance(mime, str) and isinstance(pth, str):
-            return mime, pth
-    except (json.JSONDecodeError, KeyError, TypeError):
-        pass
-    return None
+from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 
 
 def _resolve_path(
@@ -162,7 +136,7 @@ class ReadFileTool(_FsTool):
         return (
             "Read the contents of a file. Returns numbered lines. "
             "Use offset and limit to paginate through large files. "
-            "For image files (.png, .jpg, etc.) returns a vision summary when the model supports images. "
+            "For image files (.png, .jpg, etc.) returns native image content for vision-capable models. "
             "If non-ASCII characters in the path were mangled, the same directory is searched for a "
             "unique file matching the trailing id pattern (e.g. *_6425769.jpg)."
         )
@@ -187,7 +161,7 @@ class ReadFileTool(_FsTool):
             "required": ["path"],
         }
 
-    async def execute(self, path: str, offset: int = 1, limit: int | None = None, **kwargs: Any) -> str:
+    async def execute(self, path: str, offset: int = 1, limit: int | None = None, **kwargs: Any) -> Any:
         try:
             fp = self._resolve_existing_file(path)
             if not fp.exists():
@@ -195,25 +169,24 @@ class ReadFileTool(_FsTool):
             if not fp.is_file():
                 return f"Error: Not a file: {path}"
 
-            with fp.open("rb") as bf:
-                head = bf.read(32)
-            mime = detect_image_mime(head) or mimetypes.guess_type(str(fp))[0]
-            if mime and mime.startswith("image/"):
-                size = fp.stat().st_size
-                if size > _READ_FILE_IMAGE_MAX_BYTES:
-                    return (
-                        f"Error: Image too large ({size} bytes) for analysis; "
-                        f"max {_READ_FILE_IMAGE_MAX_BYTES}."
-                    )
-                return pack_read_file_image_payload(mime, fp.resolve())
+            raw = fp.read_bytes()
+            if not raw:
+                return f"(Empty file: {path})"
 
-            all_lines = fp.read_text(encoding="utf-8").splitlines()
+            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+            if mime and mime.startswith("image/"):
+                return build_image_content_blocks(raw, mime, str(fp), f"(Image file: {path})")
+
+            try:
+                text_content = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return f"Error: Cannot read binary file {path} (MIME: {mime or 'unknown'}). Only UTF-8 text and images are supported."
+
+            all_lines = text_content.splitlines()
             total = len(all_lines)
 
             if offset < 1:
                 offset = 1
-            if total == 0:
-                return f"(Empty file: {path})"
             if offset > total:
                 return f"Error: offset {offset} is beyond end of file ({total} lines)"
 
