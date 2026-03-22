@@ -24,6 +24,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
+from urllib.request import url2pathname
 
 import httpx
 from loguru import logger
@@ -158,13 +159,71 @@ def _encrypt_aes_ecb(plaintext: bytes, key: bytes) -> bytes:
         ) from e
 
 
+def _cdn_media_aes_key_json_field(aes_key_raw: bytes) -> str:
+    """Match send.ts ``Buffer.from(uploaded.aeskey).toString('base64')`` (aeskey is hex string)."""
+    return base64.b64encode(aes_key_raw.hex().encode("ascii")).decode()
+
+
+def _encode_uri_component(s: str) -> str:
+    """Match JS ``encodeURIComponent`` (cdn-url.ts).
+
+    ``urllib.parse.quote`` defaults to ``safe='/'``, which leaves ``/`` unencoded.
+    ``upload_param`` from ``getUploadUrl`` is often Base64 and contains ``/``; if
+    unencoded, the query string breaks and CDN upload/decrypt yields corrupt bytes
+    (gray/black images, wrong size metadata).
+    """
+    return quote(s, safe="")
+
+
 def _build_cdn_upload_url(*, cdn_base_url: str, upload_param: str, filekey: str) -> str:
     """CDN POST URL (cdn-url.ts buildCdnUploadUrl)."""
     return (
         f"{cdn_base_url}/upload"
-        f"?encrypted_query_param={quote(upload_param)}"
-        f"&filekey={quote(filekey)}"
+        f"?encrypted_query_param={_encode_uri_component(upload_param)}"
+        f"&filekey={_encode_uri_component(filekey)}"
     )
+
+
+def _strip_optional_quotes(s: str) -> str:
+    """Strip one pair of surrounding quotes (models often return '\"C:\\\\path\"')."""
+    t = s.strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in ('"', "'"):
+        return t[1:-1].strip()
+    return t
+
+
+def _path_from_file_uri(uri: str) -> Path:
+    """Convert ``file:`` URI to a local :class:`Path`.
+
+    ``urllib.parse.urlparse`` splits ``file://C:/Users/...`` (two slashes, common on
+    Windows) into ``netloc='C:'`` and ``path='/Users/...'``. Using only
+    ``url2pathname(path)`` drops the drive and yields ``\\Users\\...`` — wrong.
+    ``file:///C:/...`` (three slashes) is handled by ``url2pathname`` on the path.
+    """
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return Path(uri)
+    path = unquote(parsed.path)
+    netloc = unquote(parsed.netloc or "")
+
+    if os.name == "nt":
+        # file:///C:/Users/...  → path like /C:/Users/...
+        if len(path) >= 4 and path[0] == "/" and path[2] == ":" and path[1].isalpha():
+            return Path(url2pathname(path))
+        # file://C:/Users/...  → netloc=C: path=/Users/...
+        if netloc and len(netloc) >= 2 and netloc[1] == ":":
+            combined = netloc + (path if path.startswith("/") else "/" + path)
+            return Path(combined)
+        # file://localhost/C:/Users/...
+        if netloc.lower() == "localhost" and len(path) >= 4 and path[0] == "/" and path[2] == ":":
+            return Path(url2pathname(path))
+        try:
+            return Path(url2pathname(path))
+        except OSError:
+            return Path(path)
+
+    # POSIX: file:///home/foo
+    return Path(path)
 
 
 class WeixinConfig(Base):
@@ -683,10 +742,10 @@ class WeixinChannel(BaseChannel):
             elif media_aes_key_b64:
                 aes_key_b64 = media_aes_key_b64
 
-            # Build CDN download URL with proper URL-encoding (cdn-url.ts:7)
+            # Build CDN download URL (cdn-url.ts buildCdnDownloadUrl — encodeURIComponent)
             cdn_url = (
                 f"{self.config.cdn_base_url}/download"
-                f"?encrypted_query_param={quote(encrypt_query_param)}"
+                f"?encrypted_query_param={_encode_uri_component(encrypt_query_param)}"
             )
 
             assert self._client is not None
@@ -764,14 +823,10 @@ class WeixinChannel(BaseChannel):
             logger.error("Error sending WeChat message: {}", e)
 
     def _resolve_local_media_path(self, media: str) -> Path:
-        """Resolve file:// or filesystem path (channel.ts resolveLocalPath)."""
-        s = media.strip()
+        """Resolve file:// or filesystem path (channel.ts resolveLocalPath; Windows-safe)."""
+        s = _strip_optional_quotes(media)
         if s.startswith("file://"):
-            parsed = urlparse(s)
-            raw = unquote(parsed.path)
-            if os.name == "nt" and len(raw) >= 3 and raw[0] == "/" and raw[2] == ":":
-                raw = raw[1:]
-            return Path(raw)
+            return _path_from_file_uri(s)
         p = Path(s).expanduser()
         if not p.is_absolute():
             p = Path.cwd() / p
@@ -1038,7 +1093,7 @@ class WeixinChannel(BaseChannel):
         context_token: str,
     ) -> None:
         """send.ts sendImageMessageWeixin (caption already sent by _send_weixin_media_file)."""
-        aes_b64 = base64.b64encode(uploaded["aes_key_raw"]).decode()
+        aes_b64 = _cdn_media_aes_key_json_field(uploaded["aes_key_raw"])
         image_item: dict[str, Any] = {
             "type": ITEM_IMAGE,
             "image_item": {
@@ -1059,7 +1114,7 @@ class WeixinChannel(BaseChannel):
         context_token: str,
     ) -> None:
         """send.ts sendVideoMessageWeixin."""
-        aes_b64 = base64.b64encode(uploaded["aes_key_raw"]).decode()
+        aes_b64 = _cdn_media_aes_key_json_field(uploaded["aes_key_raw"])
         video_item: dict[str, Any] = {
             "type": ITEM_VIDEO,
             "video_item": {
@@ -1081,7 +1136,7 @@ class WeixinChannel(BaseChannel):
         context_token: str,
     ) -> None:
         """send.ts sendFileMessageWeixin."""
-        aes_b64 = base64.b64encode(uploaded["aes_key_raw"]).decode()
+        aes_b64 = _cdn_media_aes_key_json_field(uploaded["aes_key_raw"])
         file_item: dict[str, Any] = {
             "type": ITEM_FILE,
             "file_item": {
