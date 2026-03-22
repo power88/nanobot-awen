@@ -54,6 +54,10 @@ dependencies = [
 wecom = [
     "wecom-aibot-sdk-python>=0.1.5",
 ]
+weixin = [
+    "qrcode[pil]>=8.0",
+    "pycryptodome>=3.20.0",
+]
 matrix = [
     "matrix-nio[e2e]>=0.25.2",
     "mistune>=3.0.0,<4.0.0",
@@ -105,6 +109,8 @@ include = [
     "README.md",
     "LICENSE",
 ]
+
+
 
 [tool.ruff]
 line-length = 100
