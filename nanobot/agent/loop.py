@@ -296,7 +296,7 @@ class AgentLoop:
                 pass
         sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
         total = cancelled + sub_cancelled
-        content = f"Stopped {total} task(s)." if total else "No active task to stop."
+        content = f"已经停止了 {total} 个任务。" if total else "当前没有任务可以停止。"
         await self.bus.publish_outbound(OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=content,
         ))
@@ -304,7 +304,7 @@ class AgentLoop:
     async def _handle_restart(self, msg: InboundMessage) -> None:
         """Restart the process in-place via os.execv."""
         await self.bus.publish_outbound(OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content="Restarting...",
+            channel=msg.channel, chat_id=msg.chat_id, content="正在重启...",
         ))
 
         async def _do_restart():
@@ -312,6 +312,7 @@ class AgentLoop:
             # Use -m nanobot instead of sys.argv[0] for Windows compatibility
             # (sys.argv[0] may be just "nanobot" without full path on Windows)
             os.execv(sys.executable, [sys.executable, "-m", "nanobot"] + sys.argv[1:])
+            
 
         asyncio.create_task(_do_restart())
 
@@ -334,7 +335,7 @@ class AgentLoop:
                 logger.exception("Error processing message for session {}", msg.session_key)
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
-                    content="Sorry, I encountered an error.",
+                    content="抱歉，我遇到了一个错误。",
                 ))
 
     async def close_mcp(self) -> None:
@@ -389,7 +390,7 @@ class AgentLoop:
             self.sessions.save(session)
             self._schedule_background(self.memory_consolidator.maybe_consolidate_by_tokens(session))
             return OutboundMessage(channel=channel, chat_id=chat_id,
-                                  content=final_content or "Background task completed.")
+                                  content=final_content or "后台任务完成。")
 
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
@@ -409,14 +410,14 @@ class AgentLoop:
                 self._schedule_background(self.memory_consolidator.archive_messages(snapshot))
 
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="New session started.")
+                                  content="新会话开始。")
         if cmd == "/help":
             lines = [
-                "🐈 nanobot commands:",
-                "/new — Start a new conversation",
-                "/stop — Stop the current task",
-                "/restart — Restart the bot",
-                "/help — Show available commands",
+                "🐈 nanobot 的所有指令:",
+                "/new — 开始新会话",
+                "/stop — 停止当前任务",
+                "/restart — 重启",
+                "/help — 显示可用命令",
             ]
             return OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content="\n".join(lines),
@@ -449,7 +450,7 @@ class AgentLoop:
         )
 
         if final_content is None:
-            final_content = "I've completed processing but have no response to give."
+            final_content = "我已经完成了处理，但没有任何响应。"
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
