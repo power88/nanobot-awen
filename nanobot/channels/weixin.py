@@ -77,6 +77,14 @@ CDN_UPLOAD_MAX_RETRIES = 3
 WEIXIN_API_TIMEOUT_S = 60.0
 CDN_UPLOAD_TIMEOUT_S = 180.0
 
+# getConfig / sendTyping (api.ts DEFAULT_CONFIG_TIMEOUT_MS)
+WEIXIN_CONFIG_API_TIMEOUT_S = 10.0
+# TypingStatus (types.ts): 1 = typing, 2 = cancel
+TYPING_STATUS_TYPING = 1
+TYPING_STATUS_CANCEL = 2
+# process-message.ts createTypingCallbacks keepaliveIntervalMs
+TYPING_KEEPALIVE_INTERVAL_S = 5.0
+
 # mime.ts — extension → MIME for outbound routing
 _EXTENSION_TO_MIME: dict[str, str] = {
     ".pdf": "application/pdf",
@@ -269,6 +277,8 @@ class WeixinChannel(BaseChannel):
         self._token: str = ""
         self._poll_task: asyncio.Task | None = None
         self._next_poll_timeout_s: int = DEFAULT_LONG_POLL_TIMEOUT_S
+        self._typing_tasks: dict[str, asyncio.Task] = {}
+        self._typing_tickets: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # State persistence
@@ -380,6 +390,96 @@ class WeixinChannel(BaseChannel):
         )
         resp.raise_for_status()
         return resp.json()
+
+    # ------------------------------------------------------------------
+    # Typing indicator (getconfig + sendtyping, monitor.ts + process-message.ts)
+    # ------------------------------------------------------------------
+
+    async def _get_typing_ticket(self, ilink_user_id: str, context_token: str | None) -> str:
+        """POST ilink/bot/getconfig; returns typing_ticket or empty string."""
+        if not self._client or not self._token:
+            return ""
+        try:
+            body: dict[str, Any] = {"ilink_user_id": ilink_user_id}
+            if context_token:
+                body["context_token"] = context_token
+            data = await self._api_post(
+                "ilink/bot/getconfig",
+                body,
+                timeout=WEIXIN_CONFIG_API_TIMEOUT_S,
+            )
+            if data.get("ret") == 0:
+                return str(data.get("typing_ticket") or "")
+            return ""
+        except Exception as e:
+            logger.debug("WeChat getConfig failed: {}", e)
+            return ""
+
+    async def _send_typing_once(
+        self,
+        ilink_user_id: str,
+        typing_ticket: str,
+        status: int,
+    ) -> None:
+        """POST ilink/bot/sendtyping (best-effort; errors are logged only)."""
+        if not self._client or not self._token or not typing_ticket:
+            return
+        try:
+            data = await self._api_post(
+                "ilink/bot/sendtyping",
+                {
+                    "ilink_user_id": ilink_user_id,
+                    "typing_ticket": typing_ticket,
+                    "status": status,
+                },
+                timeout=WEIXIN_CONFIG_API_TIMEOUT_S,
+            )
+            errcode = data.get("errcode", 0)
+            if errcode and errcode != 0:
+                logger.debug(
+                    "WeChat sendTyping errcode={} errmsg={}",
+                    errcode,
+                    data.get("errmsg", ""),
+                )
+        except Exception as e:
+            logger.debug("WeChat sendTyping failed: {}", e)
+
+    def _start_typing(self, chat_id: str, typing_ticket: str) -> None:
+        """Start periodic sendTyping(TYPING); replaces any existing task for this chat."""
+        if not typing_ticket:
+            return
+        old = self._typing_tasks.pop(chat_id, None)
+        if old and not old.done():
+            old.cancel()
+        self._typing_tickets[chat_id] = typing_ticket
+        self._typing_tasks[chat_id] = asyncio.create_task(
+            self._typing_loop(chat_id, typing_ticket)
+        )
+
+    async def _typing_loop(self, chat_id: str, typing_ticket: str) -> None:
+        try:
+            while self._running:
+                await self._send_typing_once(chat_id, typing_ticket, TYPING_STATUS_TYPING)
+                await asyncio.sleep(TYPING_KEEPALIVE_INTERVAL_S)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug("WeChat typing loop stopped for {}: {}", chat_id, e)
+
+    async def _stop_typing(self, chat_id: str) -> None:
+        """Cancel typing loop and send cancel status (matches Telegram final send)."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        ticket = self._typing_tickets.pop(chat_id, None)
+        if ticket and self._client and self._token:
+            await self._send_typing_once(chat_id, ticket, TYPING_STATUS_CANCEL)
 
     # ------------------------------------------------------------------
     # QR Code Login  (matches login-qr.ts)
@@ -516,6 +616,8 @@ class WeixinChannel(BaseChannel):
         self._running = False
         if self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
+        for chat_id in list(self._typing_tasks):
+            await self._stop_typing(chat_id)
         if self._client:
             await self._client.aclose()
             self._client = None
@@ -702,6 +804,13 @@ class WeixinChannel(BaseChannel):
             len(content),
         )
 
+        typing_ticket = await self._get_typing_ticket(
+            from_user_id,
+            ctx_token or None,
+        )
+        if typing_ticket:
+            self._start_typing(from_user_id, typing_ticket)
+
         await self._handle_message(
             sender_id=from_user_id,
             chat_id=from_user_id,
@@ -785,6 +894,9 @@ class WeixinChannel(BaseChannel):
         if not self._client or not self._token:
             logger.warning("WeChat client not initialized or not authenticated")
             return
+
+        if not msg.metadata.get("_progress", False):
+            await self._stop_typing(msg.chat_id)
 
         content = msg.content.strip()
         media_refs = list(msg.media or [])
