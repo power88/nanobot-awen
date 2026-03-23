@@ -410,11 +410,11 @@ class AgentLoop:
                 self._schedule_background(self.memory_consolidator.archive_messages(snapshot))
 
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="新会话开始。")
+                                  content="已开启新对话")
         if cmd == "/help":
             lines = [
                 "🐈 nanobot 的所有指令:",
-                "/new — 开始新会话",
+                "/new — 开启新对话",
                 "/stop — 停止当前任务",
                 "/restart — 重启",
                 "/help — 显示可用命令",
