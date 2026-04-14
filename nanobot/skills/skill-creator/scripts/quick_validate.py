@@ -6,7 +6,6 @@ Implementation lives in :mod:`nanobot.agent.skill_validation`.
 """
 
 import sys
-from pathlib import Path
 
 from nanobot.agent.skill_validation import validate_skill
 
