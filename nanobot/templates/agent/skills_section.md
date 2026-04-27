@@ -12,5 +12,7 @@ The block at the end of this section is **only an index** (names, descriptions, 
 If the user’s task plausibly matches a skill name or description below, **invoke tools in this order before replying**. If a skill asks you to produce files or folders, write outputs **only under the workspace root**, not under bundled skill directories.
 
 Skills with `available="false"` need dependencies installed first — you can try installing them with apt/brew.
+The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
+Unavailable skills need dependencies installed first — you can try installing them with apt/brew.
 
 {{ skills_summary }}
