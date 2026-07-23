@@ -110,7 +110,11 @@ async def test_generate_image_tool_selects_aihubmix_provider(
         ),
         provider_configs={
             "openrouter": ProviderConfig(api_key="sk-or-test"),
-            "aihubmix": ProviderConfig(api_key="sk-ahm-test", extra_body={"quality": "low"}),
+            "aihubmix": ProviderConfig(
+                api_key="sk-ahm-test",
+                extra_body={"quality": "low"},
+                proxy="http://127.0.0.1:7890",
+            ),
         },
     )
 
@@ -121,6 +125,7 @@ async def test_generate_image_tool_selects_aihubmix_provider(
     fake = FakeImageClient.instances[0]
     assert fake.kwargs["api_key"] == "sk-ahm-test"
     assert fake.kwargs["extra_body"] == {"quality": "low"}
+    assert fake.kwargs["proxy"] == "http://127.0.0.1:7890"
     assert fake.calls[0]["model"] == "gpt-image-2-free"
     assert fake.calls[0]["aspect_ratio"] == "3:4"
 

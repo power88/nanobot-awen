@@ -187,6 +187,7 @@ class ImageGenerationProvider(ABC):
         api_base: str | None = None,
         extra_headers: dict[str, str] | None = None,
         extra_body: dict[str, Any] | None = None,
+        proxy: str | None = None,
         timeout: float | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -194,8 +195,15 @@ class ImageGenerationProvider(ABC):
         self.api_base = self._resolve_base_url(api_base)
         self.extra_headers = extra_headers or {}
         self.extra_body = extra_body or {}
+        self.proxy = proxy or None
         self.timeout = timeout if timeout is not None else self.default_timeout
         self._client = client
+
+    def _new_http_client(self) -> httpx.AsyncClient:
+        kwargs: dict[str, Any] = {"timeout": self.timeout}
+        if self.proxy:
+            kwargs["proxy"] = self.proxy
+        return httpx.AsyncClient(**kwargs)
 
     def _resolve_base_url(self, api_base: str | None) -> str:
         if api_base:
@@ -240,7 +248,7 @@ class ImageGenerationProvider(ABC):
             return await client.post(url, headers=headers, json=body)
         if self._client is not None:
             return await self._client.post(url, headers=headers, json=body)
-        async with httpx.AsyncClient(timeout=self.timeout) as c:
+        async with self._new_http_client() as c:
             return await c.post(url, headers=headers, json=body)
 
 
@@ -366,7 +374,7 @@ class AIHubMixImageGenerationClient(ImageGenerationProvider):
         }
         size = _aihubmix_size(aspect_ratio, image_size)
 
-        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        client = self._client or self._new_http_client()
         try:
             return await self._generate_with_client(
                 client,
@@ -959,7 +967,7 @@ class OpenAIImageGenerationClient(ImageGenerationProvider):
         client = self._client
         owns_client = client is None
         if owns_client:
-            client = httpx.AsyncClient(timeout=self.timeout)
+            client = self._new_http_client()
         try:
             return await _openai_images_from_payload(client, payload)
         finally:
@@ -994,7 +1002,7 @@ class OpenAIImageGenerationClient(ImageGenerationProvider):
                     data=body,
                     files=files,
                 )
-            async with httpx.AsyncClient(timeout=self.timeout) as c:
+            async with self._new_http_client() as c:
                 return await c.post(
                     f"{self.api_base}/images/edits",
                     headers=headers,
@@ -1178,7 +1186,7 @@ class CustomImageGenerationClient(ImageGenerationProvider):
         client = self._client
         owns_client = client is None
         if owns_client:
-            client = httpx.AsyncClient(timeout=self.timeout)
+            client = self._new_http_client()
         try:
             images = await _openai_images_from_payload(client, payload)
         finally:
@@ -1233,7 +1241,8 @@ class CodexImageGenerationClient(ImageGenerationProvider):
             raise ImageGenerationError(self.missing_key_message)
 
         try:
-            token = await asyncio.to_thread(get_codex_token)
+            token_kwargs = {"proxy": self.proxy} if self.proxy else {}
+            token = await asyncio.to_thread(get_codex_token, **token_kwargs)
         except Exception as exc:
             raise ImageGenerationError(self.missing_key_message) from exc
         if not token or not token.access:
@@ -1669,7 +1678,7 @@ class ZhipuImageGenerationClient(ImageGenerationProvider):
 
         url = f"{self.api_base}/images/generations"
 
-        client = self._client or httpx.AsyncClient(timeout=self.timeout)
+        client = self._client or self._new_http_client()
         try:
             return await self._generate_with_client(
                 client,

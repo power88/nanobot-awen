@@ -1182,6 +1182,56 @@ async def test_codex_payload_and_response(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_codex_uses_proxy_for_oauth_and_internal_http_client(monkeypatch) -> None:
+    import sys
+    from dataclasses import dataclass
+    from types import SimpleNamespace
+
+    proxy = "http://127.0.0.1:7890"
+    seen: dict[str, Any] = {}
+
+    @dataclass
+    class FakeToken:
+        account_id: str = "acct-123"
+        access: str = "oauth-token"
+
+    def fake_get_token(**kwargs):
+        seen["token_proxy"] = kwargs.get("proxy")
+        return FakeToken()
+
+    async def fake_to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    class ProxyClient:
+        def __init__(self, **kwargs):
+            seen["client_proxy"] = kwargs.get("proxy")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url: str, **kwargs: Any) -> FakeResponse:
+            return FakeResponse({}, sse_lines=[
+                f'data: {{"type":"response.output_item.done","item":{{"type":"image_generation_call","result":"{PNG_DATA_URL}"}}}}',
+                "",
+                "data: [DONE]",
+                "",
+            ])
+
+    monkeypatch.setattr("asyncio.to_thread", fake_to_thread)
+    monkeypatch.setitem(sys.modules, "oauth_cli_kit", SimpleNamespace(get_token=fake_get_token))
+    monkeypatch.setattr("nanobot.providers.image_generation.httpx.AsyncClient", ProxyClient)
+
+    client = CodexImageGenerationClient(api_key=None, proxy=proxy)
+    response = await client.generate(prompt="draw", model="gpt-5.4")
+
+    assert response.images == [PNG_DATA_URL]
+    assert seen == {"token_proxy": proxy, "client_proxy": proxy}
+
+
+@pytest.mark.asyncio
 async def test_codex_stops_reading_after_completed_event(monkeypatch) -> None:
     import sys
     from dataclasses import dataclass
