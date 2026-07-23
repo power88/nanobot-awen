@@ -95,6 +95,7 @@ class SubagentManager:
         max_concurrent_subagents: int | None = None,
         fail_on_tool_error: bool | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
+        image_transcriber: Any | None = None,
     ):
         if workspace is None:
             raise TypeError("SubagentManager.__init__() missing required argument: 'workspace'")
@@ -143,6 +144,7 @@ class SubagentManager:
             else defaults.fail_on_tool_error
         )
         self.runner = AgentRunner()
+        self._image_transcriber = image_transcriber
         self._llm_wall_timeout_for_session = llm_wall_timeout_for_session
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
@@ -333,6 +335,7 @@ class SubagentManager:
                     session_key=sess_key,
                     workspace=root,
                     llm_timeout_s=llm_timeout,
+                    image_transcriber=self._image_transcriber,
                 ))
             finally:
                 if token is not None:

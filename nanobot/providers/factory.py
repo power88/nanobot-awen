@@ -18,6 +18,7 @@ class ProviderSnapshot:
     context_window_tokens: int
     signature: tuple[object, ...]
     generation: GenerationSettings | None = None
+    supports_vision: bool = True
 
 
 def _resolve_model_preset(
@@ -176,6 +177,7 @@ def make_provider(
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
     model: str | None = None,
+    enable_fallbacks: bool = True,
 ) -> LLMProvider:
     """Create the LLM provider implied by config.
 
@@ -186,7 +188,7 @@ def make_provider(
     provider = _make_provider_core(config, preset_name=preset_name, preset=preset, model=model)
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
-    if fallback_presets:
+    if enable_fallbacks and fallback_presets:
         provider = FallbackProvider(
             primary=provider,
             fallback_presets=fallback_presets,
@@ -228,6 +230,7 @@ def provider_signature(
             fallback.temperature,
             fallback.reasoning_effort,
             fallback.context_window_tokens,
+            fallback.supports_vision,
             getattr(fp, "proxy", None) if fp else None,
         )
 
@@ -248,6 +251,7 @@ def provider_signature(
         resolved.temperature,
         resolved.reasoning_effort,
         resolved.context_window_tokens,
+        resolved.supports_vision,
         getattr(p, "proxy", None) if p else None,
         tuple(_fallback_signature(fallback) for fallback in fallback_presets),
     )
@@ -270,6 +274,7 @@ def build_provider_snapshot(
         context_window_tokens=min([resolved.context_window_tokens, *fallback_windows]),
         signature=provider_signature(config, preset=resolved),
         generation=resolved.to_generation_settings(),
+        supports_vision=resolved.supports_vision,
     )
 
 

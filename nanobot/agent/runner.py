@@ -83,6 +83,8 @@ class AgentRunSpec:
     goal_active_predicate: Callable[[], bool] | None = None
     goal_continue_message: GoalContinueMessage | None = None
     finalize_on_max_iterations: bool = True
+    image_transcriber: Any | None = None
+    image_transcription_cache: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -706,7 +708,34 @@ class AgentRunner:
         kwargs["temperature"] = generation.temperature
         kwargs["max_tokens"] = generation.max_tokens
         kwargs["reasoning_effort"] = generation.reasoning_effort
+        if spec.image_transcriber is not None:
+            async def _recover_images(
+                recovery_messages: list[dict[str, Any]],
+                _response: LLMResponse,
+            ) -> bool:
+                return await spec.image_transcriber.replace_images(
+                    recovery_messages,
+                    spec.image_transcription_cache,
+                )
+
+            kwargs["image_recovery_callback"] = _recover_images
         return kwargs
+
+    async def _prepare_images_for_runtime(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        if (
+            spec.image_transcriber is None
+            or spec.runtime.supports_vision
+            or not LLMProvider._has_image_content(messages)
+        ):
+            return
+        await spec.image_transcriber.replace_images(
+            messages,
+            spec.image_transcription_cache,
+        )
 
     async def _request_model(
         self,
@@ -730,6 +759,7 @@ class AgentRunner:
         if timeout_s is not None and timeout_s <= 0:
             timeout_s = None
 
+        await self._prepare_images_for_runtime(spec, messages)
         kwargs = self._build_request_kwargs(
             spec,
             messages,
@@ -978,6 +1008,7 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     ) -> LLMResponse:
+        await self._prepare_images_for_runtime(spec, messages)
         kwargs = self._build_request_kwargs(spec, messages, tools=None)
         return await spec.runtime.provider.chat_with_retry(**kwargs)
 

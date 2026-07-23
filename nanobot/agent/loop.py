@@ -49,7 +49,7 @@ from nanobot.bus.runtime_events import (
     ensure_runtime_event_publisher,
 )
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
-from nanobot.config.schema import AgentDefaults, ModelPresetConfig
+from nanobot.config.schema import AgentDefaults, Config, ModelPresetConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
 from nanobot.runtime_context import (
@@ -284,6 +284,7 @@ class AgentLoop:
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
         restart_mode: str = "auto",
         local_trigger_store: Any | None = None,
+        runtime_config: Config | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -306,13 +307,20 @@ class AgentLoop:
             else defaults.context_window_tokens
         )
         configured_presets = model_presets or {}
+        initial_supports_vision = (
+            runtime_config.resolve_preset(model_preset).supports_vision
+            if runtime_config is not None
+            else True
+        )
         self.runtime_resolver = ModelRuntimeResolver(
             LLMRuntime.capture(
                 provider,
                 initial_model,
                 context_window_tokens=initial_context_window,
                 snapshot_signature=provider_signature,
+                supports_vision=initial_supports_vision,
             ),
+            config=runtime_config,
             model_presets=configured_presets,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
@@ -355,6 +363,12 @@ class AgentLoop:
         # One file-read/write tracker per logical session. The tool registry is
         # shared by this loop, so tools resolve the active state via contextvars.
         self._file_state_store = FileStateStore()
+        image_transcriber = None
+        if runtime_config is not None and runtime_config.image_transcription.enabled:
+            from nanobot.agent.image_transcription import ImageTranscriber
+
+            image_transcriber = ImageTranscriber(runtime_config)
+        self._image_transcriber = image_transcriber
         self.runner = AgentRunner()
         self.subagents = SubagentManager(
             workspace=workspace,
@@ -367,6 +381,7 @@ class AgentLoop:
             max_concurrent_subagents=max_concurrent_subagents,
             fail_on_tool_error=fail_on_tool_error,
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
+            image_transcriber=image_transcriber,
         )
         self._unified_session = unified_session
         self._running = False
@@ -456,6 +471,7 @@ class AgentLoop:
             provider=provider,
             workspace=config.workspace_path,
             model=model,
+            runtime_config=config,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
             context_window_tokens=context_window_tokens,
@@ -541,6 +557,7 @@ class AgentLoop:
             subagent_manager=self.subagents,
             cron_service=self.cron_service,
             sessions=self.sessions,
+            runtime_resolver=self.runtime_resolver,
             provider_snapshot_loader=provider_snapshot_loader,
             image_generation_provider_configs=self._image_generation_provider_configs,
             timezone=self.context.timezone or "UTC",
@@ -951,6 +968,7 @@ class AgentLoop:
                     session_metadata=session_metadata,
                     message_metadata=metadata,
                 ),
+                image_transcriber=self._image_transcriber,
             ))
         finally:
             turn_scope_stack.close()

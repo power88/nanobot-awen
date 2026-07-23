@@ -106,6 +106,7 @@ class ModelPresetConfig(Base):
     context_window_tokens: int = 200_000
     temperature: float = 0.1
     reasoning_effort: str | None = None
+    supports_vision: bool = True
 
     def to_generation_settings(self) -> Any:
         from nanobot.providers.base import GenerationSettings
@@ -143,6 +144,7 @@ class AgentDefaults(Base):
         serialization_alias="toolHintMaxLength",
     )  # Max characters for tool hint display (e.g. "$ cd …/project && npm test")
     reasoning_effort: str | None = None  # low / medium / high / adaptive / none — LLM thinking effort; None preserves the provider default
+    supports_vision: bool = True
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
     bot_name: str = "nanobot"  # Display name shown in CLI prompts (e.g. "{name} is thinking...")
     bot_icon: str = "🐈"  # Short icon (emoji or text) shown next to the bot name in CLI; "" to omit
@@ -168,6 +170,15 @@ class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+
+
+class ImageTranscriptionConfig(Base):
+    """Fallback image-to-text conversion for models without vision support."""
+
+    enabled: bool = False
+    model_presets: list[str] = Field(default_factory=list)
+    max_image_mb: int = Field(default=8, ge=1, le=100)
+    system_prompt: str | None = None
 
 
 class ProviderConfig(Base):
@@ -395,6 +406,11 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
+    image_transcription: ImageTranscriptionConfig = Field(
+        default_factory=ImageTranscriptionConfig,
+        validation_alias=AliasChoices("imageTranscription", "image_transcription"),
+        serialization_alias="imageTranscription",
+    )
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
@@ -420,6 +436,23 @@ class Config(BaseSettings):
         for fallback in self.agents.defaults.fallback_models:
             if isinstance(fallback, str) and fallback not in self.model_presets:
                 raise ValueError(f"fallback_models entry {fallback!r} not found in model_presets")
+        if self.image_transcription.enabled:
+            if not self.image_transcription.model_presets:
+                raise ValueError(
+                    "image_transcription.model_presets must not be empty when enabled"
+                )
+            for preset_name in self.image_transcription.model_presets:
+                preset = self.model_presets.get(preset_name)
+                if preset is None:
+                    raise ValueError(
+                        f"image_transcription model preset {preset_name!r} "
+                        "not found in model_presets"
+                    )
+                if not preset.supports_vision:
+                    raise ValueError(
+                        f"image_transcription model preset {preset_name!r} "
+                        "must support vision"
+                    )
         return self
 
     def resolve_default_preset(self) -> ModelPresetConfig:
@@ -429,6 +462,7 @@ class Config(BaseSettings):
             model=d.model, provider=d.provider, max_tokens=d.max_tokens,
             context_window_tokens=d.context_window_tokens,
             temperature=d.temperature, reasoning_effort=d.reasoning_effort,
+            supports_vision=d.supports_vision,
         )
 
     def resolve_preset(self, name: str | None = None) -> ModelPresetConfig:

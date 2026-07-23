@@ -1317,7 +1317,7 @@ Contributor notes for adding new providers live in [`development.md`](./developm
 
 Model presets let you name a complete model configuration and switch it at runtime with `/model <preset>`. They are the recommended way to configure models because the same names can be reused for startup selection, chat-command switching, and fallback chains.
 
-Existing configs do not need to change. Direct `agents.defaults.model`, `provider`, `maxTokens`, `contextWindowTokens`, `temperature`, and `reasoningEffort` fields still define the implicit `default` preset. For new configs, prefer top-level `modelPresets` plus `agents.defaults.modelPreset`.
+Existing configs do not need to change. Direct `agents.defaults.model`, `provider`, `maxTokens`, `contextWindowTokens`, `temperature`, `reasoningEffort`, and `supportsVision` fields still define the implicit `default` preset. For new configs, prefer top-level `modelPresets` plus `agents.defaults.modelPreset`.
 
 ```json
 {
@@ -1376,10 +1376,57 @@ Existing configs do not need to change. Direct `agents.defaults.model`, `provide
 | `contextWindowTokens` | Context window size used by prompt building and consolidation decisions. |
 | `temperature` | Sampling temperature. |
 | `reasoningEffort` | Optional reasoning/thinking setting. Provider support varies. |
+| `supportsVision` | Whether the model accepts image input. Defaults to `true`. |
 
 `default` is reserved and always means the implicit preset built from direct `agents.defaults.*` fields; do not define `modelPresets.default`. Use `/model default` to switch back to those direct fields in an existing config.
 
 Set `agents.defaults.modelPreset` to choose the startup preset. When `modelPreset` is `null` or omitted, startup uses the implicit `default` preset from direct `agents.defaults.*` fields. Runtime changes made with `/model <preset>` are not written back to `config.json`; they affect future turns until the process restarts or another model/config change replaces them.
+
+### Image Transcription Fallback
+
+Image transcription lets a text-only model use uploaded images and images returned by
+`read_file`. When the active model has `supportsVision: false`, nanobot converts images
+to validated text before calling it. A vision-capable active model receives images
+normally, but can use the same fallback if its provider explicitly rejects image input.
+
+```json
+{
+  "imageTranscription": {
+    "enabled": true,
+    "modelPresets": ["vision-primary", "vision-backup"],
+    "maxImageMb": 8,
+    "systemPrompt": null
+  },
+  "agents": {
+    "defaults": {
+      "supportsVision": false
+    }
+  },
+  "modelPresets": {
+    "vision-primary": {
+      "model": "openai/gpt-4.1-mini",
+      "provider": "openai",
+      "supportsVision": true
+    },
+    "vision-backup": {
+      "model": "anthropic/claude-sonnet-4-5",
+      "provider": "anthropic",
+      "supportsVision": true
+    }
+  }
+}
+```
+
+`imageTranscription.enabled` defaults to `false`. When enabled, `modelPresets` must
+contain at least one existing preset and every listed preset must support vision.
+Presets are tried in order. `maxImageMb` defaults to 8. Set `systemPrompt` to replace
+the built-in transcription prompt completely.
+
+The vision model must return one JSON object with `description`, `contentType`, and
+`content`. Text documents use `contentType: "text"`; screenshots, interfaces, charts,
+tables, photographs, and mixed visual content use validated normalized-coordinate XML.
+If every preset fails or the image is too large, the image is removed and the active
+agent is instructed to tell the user that it cannot currently view it.
 
 ### Model Fallbacks
 

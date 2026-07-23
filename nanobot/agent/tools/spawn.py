@@ -17,6 +17,11 @@ if TYPE_CHECKING:
     tool_parameters_schema(
         task=StringSchema("The task for the subagent to complete"),
         label=StringSchema("Optional short label for the task (for display)"),
+        model=StringSchema(
+            "Optional model ID for this subagent. The provider is resolved automatically "
+            "from configured model routing. Defaults to the parent agent's runtime.",
+            min_length=1,
+        ),
         temperature=NumberSchema(
             description=(
                 "Optional sampling temperature for the subagent "
@@ -32,12 +37,16 @@ if TYPE_CHECKING:
 class SpawnTool(Tool):
     """Tool to spawn a subagent for background task execution."""
 
-    def __init__(self, manager: "SubagentManager"):
+    def __init__(self, manager: "SubagentManager", runtime_resolver: Any | None = None):
         self._manager = manager
+        self._runtime_resolver = runtime_resolver
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
-        return cls(manager=ctx.subagent_manager)
+        return cls(
+            manager=ctx.subagent_manager,
+            runtime_resolver=ctx.runtime_resolver,
+        )
 
     @property
     def name(self) -> str:
@@ -57,6 +66,7 @@ class SpawnTool(Tool):
         self,
         task: str,
         label: str | None = None,
+        model: str | None = None,
         temperature: float | None = None,
         **kwargs: Any,
     ) -> str:
@@ -72,12 +82,27 @@ class SpawnTool(Tool):
         request_ctx = current_request_context()
         if request_ctx is None or request_ctx.runtime is None:
             return ToolResult.error("Error: spawn requires an active model runtime")
+        runtime = request_ctx.runtime
+        if model is not None:
+            if self._runtime_resolver is None:
+                return ToolResult.error(
+                    "Error: spawn model override requires configured model routing"
+                )
+            try:
+                runtime = self._runtime_resolver.resolve_override(
+                    model=model,
+                    model_preset=None,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                return ToolResult.error(f"Error: could not resolve subagent model: {exc}")
+            if runtime is None:
+                return ToolResult.error("Error: could not resolve subagent model")
         origin_channel = request_ctx.channel
         origin_chat_id = request_ctx.chat_id
         session_key = request_ctx.session_key or f"{origin_channel}:{origin_chat_id}"
         return await self._manager.spawn(
             task=task,
-            runtime=request_ctx.runtime,
+            runtime=runtime,
             label=label,
             origin_channel=origin_channel,
             origin_chat_id=origin_chat_id,

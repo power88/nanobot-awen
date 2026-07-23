@@ -26,6 +26,7 @@ class LLMRuntime:
     context_window_tokens: int
     model_preset: str | None = None
     snapshot_signature: tuple[object, ...] | None = None
+    supports_vision: bool = True
 
     @classmethod
     def capture(
@@ -36,6 +37,7 @@ class LLMRuntime:
         context_window_tokens: int,
         model_preset: str | None = None,
         snapshot_signature: tuple[object, ...] | None = None,
+        supports_vision: bool = True,
     ) -> LLMRuntime:
         """Capture provider defaults without retaining mutable generation state."""
         defaults = GenerationSettings()
@@ -55,6 +57,7 @@ class LLMRuntime:
             context_window_tokens=context_window_tokens,
             model_preset=model_preset,
             snapshot_signature=snapshot_signature,
+            supports_vision=supports_vision,
         )
 
     def with_generation_overrides(
@@ -96,6 +99,7 @@ def runtime_from_provider_snapshot(
             context_window_tokens=snapshot.context_window_tokens,
             model_preset=model_preset,
             snapshot_signature=snapshot.signature,
+            supports_vision=snapshot.supports_vision,
         )
     return LLMRuntime.capture(
         snapshot.provider,

@@ -146,6 +146,87 @@ async def test_spawn_forwards_temperature_to_run_spec(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_spawn_tool_model_override_resolves_provider_from_config(tmp_path):
+    """A model override should build an isolated runtime using configured routing."""
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.tools.context import RequestContext, request_context
+    from nanobot.bus.queue import MessageBus
+    from nanobot.config.schema import Config
+    from nanobot.providers.anthropic_provider import AnthropicProvider
+
+    config = Config.model_validate({
+        "agents": {
+            "defaults": {
+                "workspace": str(tmp_path),
+                "model": "openai/gpt-4.1-mini",
+            },
+        },
+        "providers": {
+            "openai": {"apiKey": "sk-parent"},
+            "anthropic": {"apiKey": "sk-child"},
+        },
+    })
+    loop = AgentLoop.from_config(config, bus=MessageBus())
+    tool = loop.tools.get("spawn")
+    assert tool is not None
+    assert tool.parameters["properties"]["model"]["type"] == "string"
+
+    parent_runtime = loop.llm_runtime()
+    loop.subagents.spawn = AsyncMock(return_value="started")
+    with request_context(RequestContext(
+        channel="test",
+        chat_id="c1",
+        session_key="test:c1",
+        runtime=parent_runtime,
+    )):
+        result = await tool.execute(
+            task="do task",
+            model="anthropic/claude-sonnet-4-6",
+        )
+
+    assert result == "started"
+    child_runtime = loop.subagents.spawn.await_args.kwargs["runtime"]
+    assert child_runtime.model == "anthropic/claude-sonnet-4-6"
+    assert isinstance(child_runtime.provider, AnthropicProvider)
+    assert child_runtime is not parent_runtime
+    assert loop.llm_runtime() is parent_runtime
+
+
+@pytest.mark.asyncio
+async def test_spawn_tool_rejects_blank_model_override(tmp_path):
+    """Whitespace-only model overrides should fail before a subagent is started."""
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.agent.tools.context import RequestContext, request_context
+    from nanobot.bus.queue import MessageBus
+    from nanobot.config.schema import Config
+
+    config = Config.model_validate({
+        "agents": {
+            "defaults": {
+                "workspace": str(tmp_path),
+                "model": "openai/gpt-4.1-mini",
+            },
+        },
+        "providers": {"openai": {"apiKey": "sk-parent"}},
+    })
+    loop = AgentLoop.from_config(config, bus=MessageBus())
+    tool = loop.tools.get("spawn")
+    assert tool is not None
+    loop.subagents.spawn = AsyncMock(return_value="started")
+
+    with request_context(RequestContext(
+        channel="test",
+        chat_id="c1",
+        runtime=loop.llm_runtime(),
+    )):
+        result = await tool.execute(task="do task", model="   ")
+
+    assert result.is_error
+    assert "model must be a non-empty string" in result
+    loop.subagents.spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_spawn_tool_rejects_when_at_concurrency_limit(tmp_path):
     """SpawnTool should return an error string when the concurrency limit is reached."""
     from nanobot.agent.subagent import SubagentManager

@@ -73,6 +73,7 @@ class ToolContext:
     cron_service: Any | None = None
     sessions: Any | None = None
     file_state_store: Any = field(default=None)
+    runtime_resolver: Any | None = None
     provider_snapshot_loader: Callable[[], Any] | None = None
     image_generation_provider_configs: dict[str, Any] | None = None
     timezone: str = "UTC"

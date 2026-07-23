@@ -264,6 +264,35 @@ class LLMProvider(ABC):
     )
 
     _SENTINEL = object()
+    _VISION_ERROR_MARKERS = (
+        "image",
+        "vision",
+        "multimodal",
+        "multi-modal",
+        "unsupported",
+        "does not support",
+        "not supported",
+    )
+    _VISION_RECOVERY_EXCLUDED_MARKERS = (
+        "unauthorized",
+        "authentication",
+        "authentication_error",
+        "invalid api key",
+        "invalid_api_key",
+        "permission denied",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "timeout",
+        "timed out",
+        "insufficient quota",
+        "insufficient_quota",
+        "insufficient balance",
+        "insufficient_balance",
+        "payment required",
+        "payment_required",
+        "billing",
+    )
 
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         self.api_key = api_key
@@ -589,6 +618,43 @@ class LLMProvider(ABC):
         return result if found else None
 
     @staticmethod
+    def _has_image_content(messages: list[dict[str, Any]]) -> bool:
+        return any(
+            isinstance(block, dict) and block.get("type") == "image_url"
+            for message in messages
+            for block in (
+                message.get("content")
+                if isinstance(message.get("content"), list)
+                else ()
+            )
+        )
+
+    @classmethod
+    def _is_vision_incompatibility_response(cls, response: LLMResponse) -> bool:
+        """Return whether a non-transient error plausibly rejects image input."""
+        kind = (response.error_kind or "").strip().lower()
+        if kind in {"timeout", "connection"}:
+            return False
+        text = " ".join(
+            str(value or "")
+            for value in (
+                response.content,
+                response.error_type,
+                response.error_code,
+            )
+        ).lower()
+        if any(marker in text for marker in cls._VISION_RECOVERY_EXCLUDED_MARKERS):
+            return False
+        status = response.error_status_code
+        if status is not None:
+            status = int(status)
+            if status in {401, 402, 403, 408, 409, 429} or status >= 500:
+                return False
+            if status in {400, 415, 422}:
+                return True
+        return any(marker in text for marker in cls._VISION_ERROR_MARKERS)
+
+    @staticmethod
     def _strip_image_content_inplace(messages: list[dict[str, Any]]) -> bool:
         """Replace image_url blocks with text placeholder *in-place*.
 
@@ -678,6 +744,10 @@ class LLMProvider(ABC):
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
         retry_mode: str = "standard",
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
+        image_recovery_callback: (
+            Callable[[list[dict[str, Any]], LLMResponse], Awaitable[bool]] | None
+        ) = None,
+        allow_image_stripping: bool = True,
     ) -> LLMResponse:
         """Call chat_stream() with retry on transient provider failures."""
         if max_tokens is self._SENTINEL or max_tokens is None:
@@ -696,6 +766,13 @@ class LLMProvider(ABC):
             if on_content_delta:
                 await on_content_delta(text)
 
+        async def _tracking_thinking_delta(text: str) -> None:
+            nonlocal has_streamed_content
+            if text:
+                has_streamed_content = True
+            if on_thinking_delta:
+                await on_thinking_delta(text)
+
         async def _recover_stream() -> None:
             nonlocal has_streamed_content
             if on_stream_recover:
@@ -707,7 +784,11 @@ class LLMProvider(ABC):
             max_tokens=max_tokens, temperature=temperature,
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
             on_content_delta=_tracking_delta if on_content_delta is not None else None,
-            on_thinking_delta=on_thinking_delta,
+            on_thinking_delta=(
+                _tracking_thinking_delta
+                if on_thinking_delta is not None
+                else None
+            ),
             on_tool_call_delta=on_tool_call_delta,
         )
         if on_stream_recover and getattr(self, "supports_stream_recover_callback", False):
@@ -720,6 +801,8 @@ class LLMProvider(ABC):
             on_retry_wait=on_retry_wait,
             should_retry_guard=lambda: not has_streamed_content,
             on_stream_recover=_recover_stream if on_stream_recover else None,
+            image_recovery_callback=image_recovery_callback,
+            allow_image_stripping=allow_image_stripping,
         )
 
     async def chat_with_retry(
@@ -733,6 +816,10 @@ class LLMProvider(ABC):
         tool_choice: str | dict[str, Any] | None = None,
         retry_mode: str = "standard",
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
+        image_recovery_callback: (
+            Callable[[list[dict[str, Any]], LLMResponse], Awaitable[bool]] | None
+        ) = None,
+        allow_image_stripping: bool = True,
     ) -> LLMResponse:
         """Call chat() with retry on transient provider failures.
 
@@ -761,6 +848,8 @@ class LLMProvider(ABC):
             messages,
             retry_mode=retry_mode,
             on_retry_wait=on_retry_wait,
+            image_recovery_callback=image_recovery_callback,
+            allow_image_stripping=allow_image_stripping,
         )
 
     @classmethod
@@ -868,6 +957,10 @@ class LLMProvider(ABC):
         on_retry_wait: Callable[[str], Awaitable[None]] | None,
         should_retry_guard: Callable[[], bool] | None = None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
+        image_recovery_callback: (
+            Callable[[list[dict[str, Any]], LLMResponse], Awaitable[bool]] | None
+        ) = None,
+        allow_image_stripping: bool = True,
     ) -> LLMResponse:
         attempt = 0
         delays = list(self._CHAT_RETRY_DELAYS)
@@ -913,6 +1006,21 @@ class LLMProvider(ABC):
                 identical_error_count = 1 if error_key else 0
 
             if not self._is_transient_response(response):
+                if image_recovery_callback is not None:
+                    if (
+                        self._has_image_content(original_messages)
+                        and self._is_vision_incompatibility_response(response)
+                    ):
+                        logger.warning(
+                            "LLM rejected image content; retrying with image transcription"
+                        )
+                        if await image_recovery_callback(original_messages, response):
+                            retry_kw = dict(kw)
+                            retry_kw["messages"] = original_messages
+                            return await call(**retry_kw)
+                    return response
+                if not allow_image_stripping:
+                    return response
                 stripped = self._strip_image_content(original_messages)
                 if stripped is not None and stripped != kw["messages"]:
                     logger.warning(

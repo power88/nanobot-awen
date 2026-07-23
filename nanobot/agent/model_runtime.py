@@ -23,11 +23,13 @@ class ModelRuntimeResolver:
         self,
         initial_runtime: LLMRuntime,
         *,
+        config: Config | None = None,
         model_presets: Mapping[str, ModelPresetConfig] | None = None,
         provider_snapshot_loader: Callable[[], ProviderSnapshot] | None = None,
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
     ) -> None:
         self._runtime = initial_runtime
+        self._config = config
         self._model_presets = dict(model_presets or {})
         self._provider_snapshot_loader = provider_snapshot_loader
         self._preset_snapshot_loader = preset_snapshot_loader
@@ -137,6 +139,7 @@ class ModelRuntimeResolver:
             context_window_tokens=runtime.context_window_tokens,
             model_preset=runtime.model_preset,
             snapshot_signature=runtime.snapshot_signature,
+            supports_vision=runtime.supports_vision,
         )
         if captured.generation == runtime.generation:
             return None
@@ -189,6 +192,10 @@ class ModelRuntimeResolver:
             return self.resolve_preset(model_preset)
         if model is None:
             return None
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("model must be a non-empty string")
+        model = model.strip()
+        config = config or self._config
         if config is None:
             return LLMRuntime(
                 provider=self._runtime.provider,
