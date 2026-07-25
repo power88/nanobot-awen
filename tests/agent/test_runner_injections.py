@@ -611,6 +611,7 @@ async def test_injection_cycles_capped_at_max():
     tools.get_definitions.return_value = []
 
     drain_count = {"n": 0}
+    injection_closed = AsyncMock()
 
     async def inject_cb():
         drain_count["n"] += 1
@@ -627,11 +628,13 @@ async def test_injection_cycles_capped_at_max():
         max_iterations=20,
         max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
         injection_callback=inject_cb,
+        injection_closed_callback=injection_closed,
     ))
 
     assert result.had_injections is True
     # Should be capped: _MAX_INJECTION_CYCLES injection rounds + 1 final round
     assert call_count["n"] == _MAX_INJECTION_CYCLES + 1
+    injection_closed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -719,6 +722,32 @@ async def test_waiting_dispatch_does_not_replace_active_pending_queue(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_publishes_injection_queue_before_concurrency_gate(tmp_path):
+    """A newly admitted turn remains injectable while waiting for global capacity."""
+    from nanobot.bus.events import InboundMessage
+
+    loop = _make_loop(tmp_path)
+    loop._concurrency_gate = asyncio.Semaphore(0)
+    session_key = "cli:c"
+    original = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="original")
+    followup = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="follow-up")
+    dispatch_task = asyncio.create_task(loop._dispatch(original))
+    loop._active_tasks[session_key] = [dispatch_task]
+
+    await asyncio.sleep(0)
+    pending = loop._pending_queues[session_key]
+    assert await loop._try_inject_or_interrupt(followup, session_key) is True
+    assert pending.get_nowait() is followup
+    assert not dispatch_task.done()
+    loop.subagents.cancel_by_session.assert_not_awaited()
+
+    dispatch_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch_task
+    assert session_key not in loop._pending_queues
+
+
+@pytest.mark.asyncio
 async def test_followup_routed_to_pending_queue(tmp_path):
     """Unified-session follow-ups should route into the active pending queue."""
     from nanobot.bus.events import InboundMessage
@@ -730,6 +759,8 @@ async def test_followup_routed_to_pending_queue(tmp_path):
 
     pending = asyncio.Queue(maxsize=20)
     loop._pending_queues[UNIFIED_SESSION_KEY] = pending
+    active_task = asyncio.create_task(asyncio.Event().wait())
+    loop._active_tasks[UNIFIED_SESSION_KEY] = [active_task]
 
     run_task = asyncio.create_task(loop.run())
     msg = InboundMessage(channel="discord", sender_id="u", chat_id="c", content="follow-up")
@@ -743,6 +774,11 @@ async def test_followup_routed_to_pending_queue(tmp_path):
     assert loop._dispatch.await_count == 0
     assert queued_msg.content == "follow-up"
     assert queued_msg.session_key == UNIFIED_SESSION_KEY
+    assert not active_task.done()
+    loop.subagents.cancel_by_session.assert_not_awaited()
+    active_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await active_task
 
 
 @pytest.mark.asyncio
@@ -1015,35 +1051,96 @@ async def test_pending_queue_preserves_overflow_for_next_injection_cycle(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_pending_queue_full_falls_back_to_queued_task(tmp_path):
-    """QueueFull should preserve the message by dispatching a queued task."""
+async def test_pending_queue_full_silently_cancels_and_republishes_fifo(tmp_path):
+    """QueueFull should cancel, then re-publish old and new messages in FIFO order."""
     from nanobot.bus.events import InboundMessage
 
     loop = _make_loop(tmp_path)
-    dispatched = asyncio.Event()
-
-    async def _dispatch(_msg):
-        dispatched.set()
-
-    loop._dispatch = AsyncMock(side_effect=_dispatch)  # type: ignore[method-assign]
-
     pending = asyncio.Queue(maxsize=1)
-    pending.put_nowait(InboundMessage(channel="cli", sender_id="u", chat_id="c", content="already queued"))
-    loop._pending_queues["cli:c"] = pending
+    old = InboundMessage(
+        channel="cli",
+        sender_id="u",
+        chat_id="c",
+        content="already queued",
+        media=["old.png"],
+    )
+    new = InboundMessage(
+        channel="cli",
+        sender_id="u",
+        chat_id="c",
+        content="follow-up",
+        media=["new.png"],
+        metadata={"attachment": "kept"},
+    )
+    pending.put_nowait(old)
+    session_key = "cli:c"
+    loop._pending_queues[session_key] = pending
+    active_task = asyncio.create_task(asyncio.Event().wait())
+    loop._active_tasks[session_key] = [active_task]
 
-    run_task = asyncio.create_task(loop.run())
-    msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="follow-up")
-    await loop.bus.publish_inbound(msg)
+    async def _cancel_and_cleanup(key):
+        active_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active_task
+        loop._active_tasks.pop(key, None)
+        loop._pending_queues.pop(key, None)
+        await loop.bus.publish_inbound(pending.get_nowait())
+        return 1
 
-    await asyncio.wait_for(dispatched.wait(), timeout=2)
+    loop._cancel_active_tasks = AsyncMock(side_effect=_cancel_and_cleanup)  # type: ignore[method-assign]
 
-    loop.stop()
-    await asyncio.wait_for(run_task, timeout=2)
+    handled = await loop._try_inject_or_interrupt(new, session_key)
 
-    assert loop._dispatch.await_count == 1
-    dispatched_msg = loop._dispatch.await_args.args[0]
-    assert dispatched_msg.content == "follow-up"
-    assert pending.qsize() == 1
+    assert handled is True
+    first = await loop.bus.consume_inbound()
+    second = await loop.bus.consume_inbound()
+    assert first is old
+    assert second is new
+    assert second.media == ["new.png"]
+    assert second.metadata == {"attachment": "kept"}
+    assert loop.bus.outbound.empty()
+
+
+@pytest.mark.asyncio
+async def test_active_task_without_injection_entry_uses_silent_fallback(tmp_path):
+    """An active turn with a closed/missing entry must be cancelled and retried."""
+    from nanobot.bus.events import InboundMessage
+
+    loop = _make_loop(tmp_path)
+    session_key = "cli:c"
+    active_task = asyncio.create_task(asyncio.Event().wait())
+    loop._active_tasks[session_key] = [active_task]
+    loop._cancel_active_tasks = AsyncMock(return_value=1)  # type: ignore[method-assign]
+    msg = InboundMessage(channel="cli", sender_id="u", chat_id="c", content="retry me")
+
+    assert await loop._try_inject_or_interrupt(msg, session_key) is True
+    loop._cancel_active_tasks.assert_awaited_once_with(session_key)
+    assert await loop.bus.consume_inbound() is msg
+    assert loop.bus.outbound.empty()
+
+    active_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await active_task
+
+
+@pytest.mark.asyncio
+async def test_no_live_task_does_not_trigger_fallback(tmp_path):
+    """A task that just completed must not cause a spurious cancellation."""
+    from nanobot.bus.events import InboundMessage
+
+    loop = _make_loop(tmp_path)
+    completed = asyncio.create_task(asyncio.sleep(0))
+    await completed
+    loop._active_tasks["cli:c"] = [completed]
+    loop._cancel_active_tasks = AsyncMock()  # type: ignore[method-assign]
+
+    handled = await loop._try_inject_or_interrupt(
+        InboundMessage(channel="cli", sender_id="u", chat_id="c", content="next"),
+        "cli:c",
+    )
+
+    assert handled is False
+    loop._cancel_active_tasks.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1088,6 +1185,67 @@ async def test_dispatch_republishes_leftover_queue_messages(tmp_path):
     contents = [m.content for m in msgs]
     assert "leftover-1" in contents
     assert "leftover-2" in contents
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tool_batch_checkpoints_only_completed_results():
+    """Cancellation preserves finished tools without fabricating pending results."""
+    from copy import deepcopy
+
+    from nanobot.agent.runner import AgentRunner
+
+    provider = MagicMock()
+
+    async def chat_with_retry(**_kwargs):
+        return LLMResponse(
+            content="working",
+            tool_calls=[
+                ToolCallRequest(id="done", name="first", arguments={}),
+                ToolCallRequest(id="pending", name="second", arguments={}),
+            ],
+            usage={},
+        )
+
+    provider.chat_with_retry = chat_with_retry
+    second_started = asyncio.Event()
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+
+    async def execute(name, _arguments):
+        if name == "first":
+            return "first result"
+        second_started.set()
+        await asyncio.Event().wait()
+
+    tools.execute = AsyncMock(side_effect=execute)
+    checkpoints: list[dict] = []
+
+    async def checkpoint(payload):
+        checkpoints.append(deepcopy(payload))
+
+    runner = AgentRunner()
+    run_task = asyncio.create_task(
+        runner.run(
+            make_run_spec(
+                provider,
+                initial_messages=[{"role": "user", "content": "start"}],
+                tools=tools,
+                model="test-model",
+                max_iterations=3,
+                max_tool_result_chars=_MAX_TOOL_RESULT_CHARS,
+                checkpoint_callback=checkpoint,
+                concurrent_tools=False,
+            )
+        )
+    )
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+
+    latest = checkpoints[-1]
+    assert [item["tool_call_id"] for item in latest["completed_tool_results"]] == ["done"]
+    assert [item["id"] for item in latest["pending_tool_calls"]] == ["pending"]
 
 
 @pytest.mark.asyncio

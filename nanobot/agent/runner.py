@@ -9,7 +9,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -79,6 +79,7 @@ class AgentRunSpec:
     retry_wait_callback: Any | None = None
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
+    injection_closed_callback: Callable[[], Any] | None = None
     llm_timeout_s: float | None = None
     goal_active_predicate: Callable[[], bool] | None = None
     goal_continue_message: GoalContinueMessage | None = None
@@ -179,6 +180,8 @@ class AgentRunner:
             return False, injection_cycles
         if real_injection:
             injection_cycles += 1
+            if injection_cycles >= _MAX_INJECTION_CYCLES:
+                await self._notify_injection_closed(spec)
         if assistant_message is not None:
             messages.append(assistant_message)
             if iteration is not None:
@@ -202,6 +205,19 @@ class AgentRunner:
         else:
             logger.info("Injected sustained-goal continuation {}", phase)
         return True, injection_cycles
+
+    @staticmethod
+    async def _notify_injection_closed(spec: AgentRunSpec) -> None:
+        """Tell the caller that this run can no longer consume follow-ups."""
+        callback = spec.injection_closed_callback
+        if callback is None:
+            return
+        try:
+            result = callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("injection_closed_callback failed")
 
     def _build_goal_continue_message(self, spec: AgentRunSpec) -> dict[str, str]:
         custom = spec.goal_continue_message
@@ -436,6 +452,46 @@ class AgentRunner:
 
                 await hook.before_execute_tools(context)
 
+                completed_tool_results_by_id: dict[str, dict[str, Any]] = {}
+                checkpoint_lock = asyncio.Lock()
+
+                async def _checkpoint_tool_result(
+                    tool_call: ToolCallRequest,
+                    result: Any,
+                ) -> None:
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "content": self.context_governor.normalize_tool_result(
+                            governance_config,
+                            tool_call.id,
+                            tool_call.name,
+                            result,
+                        ),
+                    }
+                    async with checkpoint_lock:
+                        completed_tool_results_by_id[tool_call.id] = tool_message
+                        await self._emit_checkpoint(
+                            spec,
+                            {
+                                "phase": "awaiting_tools",
+                                "iteration": iteration,
+                                "model": spec.runtime.model,
+                                "assistant_message": assistant_message,
+                                "completed_tool_results": [
+                                    completed_tool_results_by_id[call.id]
+                                    for call in response.tool_calls
+                                    if call.id in completed_tool_results_by_id
+                                ],
+                                "pending_tool_calls": [
+                                    call.to_openai_tool_call()
+                                    for call in response.tool_calls
+                                    if call.id not in completed_tool_results_by_id
+                                ],
+                            },
+                        )
+
                 results, new_events, fatal_error = await self._execute_tools(
                     spec,
                     response.tool_calls,
@@ -443,6 +499,9 @@ class AgentRunner:
                     workspace_violation_counts,
                     hook,
                     context,
+                    on_tool_result=(
+                        _checkpoint_tool_result if spec.checkpoint_callback is not None else None
+                    ),
                 )
                 tool_events.extend(new_events)
                 tools_used.extend(
@@ -1119,36 +1178,39 @@ class AgentRunner:
         workspace_violation_counts: dict[str, int],
         hook: AgentHook | None = None,
         context: AgentHookContext | None = None,
+        on_tool_result: Callable[[ToolCallRequest, Any], Awaitable[None]] | None = None,
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
         hook = hook or AgentHook()
         context = context or AgentHookContext(iteration=0, messages=[])
         batches = self._partition_tool_batches(spec, tool_calls)
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
+
+        async def _run_and_report(
+            tool_call: ToolCallRequest,
+        ) -> tuple[Any, dict[str, str], BaseException | None]:
+            result = await self._run_tool(
+                spec,
+                tool_call,
+                external_lookup_counts,
+                workspace_violation_counts,
+                hook,
+                context,
+            )
+            if on_tool_result is not None:
+                await on_tool_result(tool_call, result[0])
+            return result
+
         for batch in batches:
             if spec.concurrent_tools and len(batch) > 1:
                 batch_results = await asyncio.gather(*(
-                    self._run_tool(
-                        spec,
-                        tool_call,
-                        external_lookup_counts,
-                        workspace_violation_counts,
-                        hook,
-                        context,
-                    )
+                    _run_and_report(tool_call)
                     for tool_call in batch
                 ))
                 tool_results.extend(batch_results)
             else:
                 batch_results = []
                 for tool_call in batch:
-                    result = await self._run_tool(
-                        spec,
-                        tool_call,
-                        external_lookup_counts,
-                        workspace_violation_counts,
-                        hook,
-                        context,
-                    )
+                    result = await _run_and_report(tool_call)
                     tool_results.append(result)
                     batch_results.append(result)
 

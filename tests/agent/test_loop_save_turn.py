@@ -537,7 +537,7 @@ def test_save_turn_stamps_latency_on_last_assistant() -> None:
     assert session.messages[-1]["latency_ms"] == 12345
 
 
-def test_restore_runtime_checkpoint_rehydrates_completed_and_pending_tools() -> None:
+def test_restore_runtime_checkpoint_rehydrates_only_completed_tools() -> None:
     loop = _mk_loop()
     session = Session(
         key="test:checkpoint",
@@ -584,8 +584,8 @@ def test_restore_runtime_checkpoint_rehydrates_completed_and_pending_tools() -> 
     assert session.metadata.get(AgentLoop._RUNTIME_CHECKPOINT_KEY) is None
     assert session.messages[0]["role"] == "assistant"
     assert session.messages[1]["tool_call_id"] == "call_done"
-    assert session.messages[2]["tool_call_id"] == "call_pending"
-    assert "interrupted before this tool finished" in session.messages[2]["content"].lower()
+    assert len(session.messages) == 2
+    assert all(message.get("tool_call_id") != "call_pending" for message in session.messages)
 
 
 def test_restore_runtime_checkpoint_dedupes_overlapping_tail() -> None:
@@ -657,10 +657,9 @@ def test_restore_runtime_checkpoint_dedupes_overlapping_tail() -> None:
 
     assert restored is True
     assert session.metadata.get(AgentLoop._RUNTIME_CHECKPOINT_KEY) is None
-    assert len(session.messages) == 3
+    assert len(session.messages) == 2
     assert session.messages[0]["role"] == "assistant"
     assert session.messages[1]["tool_call_id"] == "call_done"
-    assert session.messages[2]["tool_call_id"] == "call_pending"
 
 
 @pytest.mark.asyncio
@@ -1332,12 +1331,6 @@ async def test_stop_preserves_runtime_checkpoint_for_next_turn(tmp_path: Path) -
         {"role": "user", "content": "keep progress"},
         {"role": "assistant", "content": "working"},
         {"role": "tool", "tool_call_id": "call_done", "name": "read_file", "content": "ok"},
-        {
-            "role": "tool",
-            "tool_call_id": "call_pending",
-            "name": "exec",
-            "content": "Error: Task interrupted before this tool finished.",
-        },
         {"role": "user", "content": "continue here"},
         {"role": "assistant", "content": "next answer"},
     ]

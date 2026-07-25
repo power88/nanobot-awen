@@ -785,6 +785,93 @@ class AgentLoop:
         sub_cancelled = await self.subagents.cancel_by_session(key)
         return cancelled + sub_cancelled
 
+    def _live_tasks(self, key: str) -> list[asyncio.Task]:
+        """Return unfinished dispatch tasks for a session."""
+        return [task for task in self._active_tasks.get(key, []) if not task.done()]
+
+    def _active_session_keys(self) -> set[str]:
+        """Return sessions that are still running, including closed injection entries."""
+        return {
+            *self._pending_queues,
+            *(key for key in self._active_tasks if self._live_tasks(key)),
+        }
+
+    async def _try_inject_or_interrupt(
+        self,
+        msg: InboundMessage,
+        session_key: str,
+    ) -> bool:
+        """Inject an ordinary follow-up or silently restart it after cancellation.
+
+        Returns ``True`` when the message was queued or re-published.  ``False``
+        means there is no active turn and the caller should dispatch normally.
+        """
+        tasks = self._live_tasks(session_key)
+        queue = self._pending_queues.get(session_key)
+        if tasks and queue is None:
+            # Let a newly-created dispatch publish its queue before treating
+            # the missing entry as structural.  This is especially important
+            # while it is waiting on the cross-session concurrency gate.
+            await asyncio.sleep(0)
+            tasks = self._live_tasks(session_key)
+            queue = self._pending_queues.get(session_key)
+        if not tasks:
+            return False
+
+        pending_msg = msg
+        if session_key != msg.session_key:
+            pending_msg = dataclasses.replace(msg, session_key_override=session_key)
+
+        if queue is not None:
+            try:
+                queue.put_nowait(pending_msg)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "Pending queue full for session {}; interrupting active turn",
+                    session_key,
+                )
+            else:
+                logger.info(
+                    "Routed follow-up message to pending queue for session {}",
+                    session_key,
+                )
+                return True
+        else:
+            logger.warning(
+                "No injection entry for active session {}; interrupting active turn",
+                session_key,
+            )
+
+        # Use /stop's cancellation semantics without invoking the command:
+        # dispatch cleanup restores the checkpoint and republishes older queued
+        # follow-ups before this triggering message is placed back on the bus.
+        await self._cancel_active_tasks(session_key)
+        await self.bus.publish_inbound(pending_msg)
+        return True
+
+    async def _release_pending_queue(
+        self,
+        session_key: str,
+        pending: asyncio.Queue,
+    ) -> None:
+        """Remove an owned injection queue and re-publish its leftovers."""
+        if self._pending_queues.get(session_key) is pending:
+            self._pending_queues.pop(session_key, None)
+        leftover = 0
+        while True:
+            try:
+                item = pending.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            await self.bus.publish_inbound(item)
+            leftover += 1
+        if leftover:
+            logger.info(
+                "Re-published {} leftover message(s) to bus for session {}",
+                leftover,
+                session_key,
+            )
+
     def _effective_session_key(self, msg: InboundMessage) -> str:
         """Return the session key used for task routing and mid-turn injections."""
         if self._unified_session and not msg.session_key_override:
@@ -1062,6 +1149,19 @@ class AgentLoop:
             )
 
         session_metadata = session.metadata if session is not None else None
+
+        def _close_injection_entry() -> None:
+            if (
+                active_session_key is not None
+                and pending_queue is not None
+                and self._pending_queues.get(active_session_key) is pending_queue
+            ):
+                self._pending_queues.pop(active_session_key, None)
+                logger.info(
+                    "Closed mid-turn injection entry for session {}",
+                    active_session_key,
+                )
+
         try:
             for scope in turn_scopes or ():
                 turn_scope_stack.enter_context(scope)
@@ -1105,6 +1205,7 @@ class AgentLoop:
                     retry_wait_callback=on_retry_wait,
                     checkpoint_callback=_checkpoint,
                     injection_callback=_drain_pending,
+                    injection_closed_callback=_close_injection_entry,
                     # Sustained goals may legitimately exceed NANOBOT_LLM_TIMEOUT_S; idle stall
                     # is still capped by NANOBOT_STREAM_IDLE_TIMEOUT_S in streaming providers.
                     llm_timeout_s=runner_wall_llm_timeout_s(
@@ -1169,7 +1270,7 @@ class AgentLoop:
                     self.auto_compact.check_expired(
                         self._schedule_background,
                         self.llm_runtime,
-                        active_session_keys=self._pending_queues.keys(),
+                        active_session_keys=self._active_session_keys(),
                     )
                     continue
                 except asyncio.CancelledError:
@@ -1207,7 +1308,7 @@ class AgentLoop:
                     if coordinator.defer_if_active(
                         msg,
                         session_key=effective_key,
-                        active_session_keys=self._pending_queues.keys(),
+                        active_session_keys=self._active_session_keys(),
                     ):
                         logger.info(
                             "Deferred {} turn for active session {}",
@@ -1218,39 +1319,19 @@ class AgentLoop:
                         break
                 if deferred:
                     continue
-                # If this session already has an active pending queue (i.e. a task
-                # is processing this session), route the message there for mid-turn
-                # injection instead of creating a competing task.
-                if effective_key in self._pending_queues:
-                    # Non-priority commands must not be queued for injection;
-                    # dispatch them directly (same pattern as priority commands).
-                    if self.commands.is_dispatchable_command(raw):
-                        await self._dispatch_command_inline(
-                            msg,
-                            effective_key,
-                            raw,
-                            self.commands.dispatch,
-                        )
-                        continue
-                    pending_msg = msg
-                    if effective_key != msg.session_key:
-                        pending_msg = dataclasses.replace(
-                            msg,
-                            session_key_override=effective_key,
-                        )
-                    try:
-                        self._pending_queues[effective_key].put_nowait(pending_msg)
-                    except asyncio.QueueFull:
-                        logger.warning(
-                            "Pending queue full for session {}, falling back to queued task",
-                            effective_key,
-                        )
-                    else:
-                        logger.info(
-                            "Routed follow-up message to pending queue for session {}",
-                            effective_key,
-                        )
-                        continue
+                session_active = bool(self._live_tasks(effective_key))
+                if session_active and self.commands.is_dispatchable_command(raw):
+                    # Slash commands retain their existing direct-dispatch
+                    # semantics and never enter the automatic fallback path.
+                    await self._dispatch_command_inline(
+                        msg,
+                        effective_key,
+                        raw,
+                        self.commands.dispatch,
+                    )
+                    continue
+                if await self._try_inject_or_interrupt(msg, effective_key):
+                    continue
                 # Compute the effective session key before dispatching
                 # This ensures /stop command can find tasks correctly when unified session is enabled
                 task = asyncio.create_task(self._dispatch(msg))
@@ -1275,12 +1356,21 @@ class AgentLoop:
         gate = self._concurrency_gate or nullcontext()
 
         pending: asyncio.Queue | None = None
+        entered_dispatch = False
+        # Publish the first dispatch's queue before it can block on the global
+        # concurrency gate.  A task already waiting on the session lock must
+        # never replace the current owner's queue.
+        if not lock.locked():
+            pending = asyncio.Queue(maxsize=20)
+            self._pending_queues[session_key] = pending
         try:
             async with lock, gate:
+                entered_dispatch = True
                 # Only the task that owns the session lock may publish the
                 # active mid-turn injection queue for this session.
-                pending = asyncio.Queue(maxsize=20)
-                self._pending_queues[session_key] = pending
+                if pending is None:
+                    pending = asyncio.Queue(maxsize=20)
+                    self._pending_queues[session_key] = pending
                 try:
                     on_stream = on_stream_end = None
                     if msg.metadata.get("_wants_stream"):
@@ -1402,32 +1492,15 @@ class AgentLoop:
                     # rather than silently lost.  Only remove our own queue; a
                     # later task waiting on the lock must not be able to steal
                     # cleanup ownership.
-                    queue = None
-                    if self._pending_queues.get(session_key) is pending:
-                        queue = self._pending_queues.pop(session_key, None)
-                    else:
-                        queue = pending
-                    if queue is not None:
-                        leftover = 0
-                        while True:
-                            try:
-                                item = queue.get_nowait()
-                            except asyncio.QueueEmpty:
-                                break
-                            await self.bus.publish_inbound(item)
-                            leftover += 1
-                        if leftover:
-                            logger.info(
-                                "Re-published {} leftover message(s) to bus for session {}",
-                                leftover,
-                                session_key,
-                            )
+                    await self._release_pending_queue(session_key, pending)
                     if not turn_continuation.internal_continuation_pending(msg.metadata):
                         await self._runtime_events().run_status_changed(msg, session_key, "idle")
                         self._runtime_events().clear_turn(session_key)
                     await self._publish_next_deferred_automation_turn(session_key)
         finally:
-            if pending is None:
+            if not entered_dispatch:
+                if pending is not None:
+                    await self._release_pending_queue(session_key, pending)
                 await self._runtime_events().run_status_changed(msg, session_key, "idle")
                 self._runtime_events().clear_turn(session_key)
                 await self._publish_next_deferred_automation_turn(session_key)
@@ -2087,8 +2160,6 @@ class AgentLoop:
 
         assistant_message = checkpoint.get("assistant_message")
         completed_tool_results = checkpoint.get("completed_tool_results") or []
-        pending_tool_calls = checkpoint.get("pending_tool_calls") or []
-
         restored_messages: list[dict[str, Any]] = []
         if isinstance(assistant_message, dict):
             restored = dict(assistant_message)
@@ -2099,21 +2170,6 @@ class AgentLoop:
                 restored = dict(message)
                 restored.setdefault("timestamp", datetime.now().isoformat())
                 restored_messages.append(restored)
-        for tool_call in pending_tool_calls:
-            if not isinstance(tool_call, dict):
-                continue
-            tool_id = tool_call.get("id")
-            name = ((tool_call.get("function") or {}).get("name")) or "tool"
-            restored_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_id,
-                    "name": name,
-                    "content": "Error: Task interrupted before this tool finished.",
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
-
         overlap = 0
         max_overlap = min(len(session.messages), len(restored_messages))
         for size in range(max_overlap, 0, -1):
