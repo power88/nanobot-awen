@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import re
 import time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, ExitStack, nullcontext, suppress
@@ -80,7 +81,11 @@ from nanobot.session.manager import (
     replay_max_messages_for_context,
 )
 from nanobot.triggers.local_turns import LocalTriggerTurnCoordinator
-from nanobot.utils.document import extract_documents, reference_non_image_attachments
+from nanobot.utils.document import (
+    extract_documents,
+    is_image_file,
+    reference_non_image_attachments,
+)
 from nanobot.utils.helpers import image_placeholder_text
 from nanobot.utils.helpers import truncate_text as truncate_text_fn
 from nanobot.utils.llm_runtime import LLMRuntime
@@ -96,6 +101,17 @@ if TYPE_CHECKING:
         ToolsConfig,
     )
     from nanobot.cron.service import CronService
+
+
+_PENDING_IMAGE_TTL_SECONDS = 5 * 60
+_IMAGE_PLACEHOLDER_RE = re.compile(r"\[(?:image|photo)(?::[^\]]*)?\]", re.IGNORECASE)
+
+
+@dataclass
+class _PendingImages:
+    paths: list[str]
+    expires_at: float
+
 
 class TurnState(Enum):
     RESTORE = auto()
@@ -396,6 +412,7 @@ class AgentLoop:
         # When a session has an active task, new messages for that session
         # are routed here instead of creating a new task.
         self._pending_queues: dict[str, asyncio.Queue] = {}
+        self._pending_images: dict[str, _PendingImages] = {}
         self._deferred_automation_turns: dict[str, list[InboundMessage]] = {}
         self._cron_turns = CronTurnCoordinator(
             publish_inbound=self.bus.publish_inbound,
@@ -762,6 +779,70 @@ class AgentLoop:
         return msg.session_key
 
     @staticmethod
+    def _is_image_only_message(msg: InboundMessage) -> bool:
+        """Return whether a message contains images but no user-authored text."""
+        if not msg.media or not all(is_image_file(path) for path in msg.media):
+            return False
+
+        content = msg.content.strip()
+        if not content:
+            return True
+
+        # Channel adapters commonly synthesize these representations for an
+        # otherwise text-free image message.
+        if content.lower().startswith("[image]\nreceived files:"):
+            return True
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        return bool(lines) and all(_IMAGE_PLACEHOLDER_RE.fullmatch(line) for line in lines)
+
+    def _expire_pending_images(self, now: float | None = None) -> None:
+        """Drop image batches that have not been continued within the TTL."""
+        current = time.monotonic() if now is None else now
+        expired = [
+            session_key
+            for session_key, batch in self._pending_images.items()
+            if batch.expires_at <= current
+        ]
+        for session_key in expired:
+            self._pending_images.pop(session_key, None)
+            logger.debug("Cleared expired pending images for session {}", session_key)
+
+    async def _route_image_collection(
+        self,
+        msg: InboundMessage,
+    ) -> InboundMessage | None:
+        """Collect image-only turns and merge the batch into the next text turn."""
+        now = time.monotonic()
+        self._expire_pending_images(now)
+        _, automation_metadata = automation_history_overrides(msg.metadata)
+        if msg.channel == "system" or automation_metadata:
+            return msg
+        session_key = self._effective_session_key(msg)
+
+        if self._is_image_only_message(msg):
+            batch = self._pending_images.get(session_key)
+            if batch is None:
+                batch = _PendingImages(paths=[], expires_at=now + _PENDING_IMAGE_TTL_SECONDS)
+                self._pending_images[session_key] = batch
+            batch.paths.extend(msg.media)
+            batch.expires_at = now + _PENDING_IMAGE_TTL_SECONDS
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"已添加 {len(batch.paths)} 张图片，发送图片继续添加\n当前图片列表:\n" + "\n".join(batch.paths),
+                    metadata=dict(msg.metadata or {}),
+                )
+            )
+            return None
+
+        batch = self._pending_images.get(session_key)
+        if batch is not None and msg.content.strip():
+            self._pending_images.pop(session_key, None)
+            return dataclasses.replace(msg, media=[*batch.paths, *msg.media])
+        return msg
+
+    @staticmethod
     def _replay_token_budget(runtime: LLMRuntime) -> int:
         """Derive a token budget for session history replay from the context window."""
         if runtime.context_window_tokens <= 0:
@@ -1004,6 +1085,7 @@ class AgentLoop:
                 try:
                     msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
                 except asyncio.TimeoutError:
+                    self._expire_pending_images()
                     self.auto_compact.check_expired(
                         self._schedule_background,
                         self.llm_runtime,
@@ -1020,10 +1102,13 @@ class AgentLoop:
                     logger.warning("Error consuming inbound message: {}, continuing...", e)
                     continue
 
-                raw = msg.content.strip()
                 effective_key = self._effective_session_key(msg)
                 if await agent_context.handle_runtime_control(self, msg, self.tools):
                     continue
+                msg = await self._route_image_collection(msg)
+                if msg is None:
+                    continue
+                raw = msg.content.strip()
                 if self.commands.is_priority(raw):
                     await self._dispatch_command_inline(
                         msg, effective_key, raw,
