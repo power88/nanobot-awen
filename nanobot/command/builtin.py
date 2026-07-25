@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import time
@@ -15,7 +16,9 @@ from nanobot import __version__
 from nanobot.agent.goal_permission import goal_mutation_permission
 from nanobot.bus.events import OutboundMessage
 from nanobot.command.router import CommandContext, CommandRouter
+from nanobot.session.automation_turns import automation_history_overrides
 from nanobot.utils.helpers import build_status_content
+from nanobot.utils.media import format_media_list
 from nanobot.utils.restart import set_restart_notice_to_env
 
 # WebUI protocol contract for how a slash command participates in turn state:
@@ -96,6 +99,14 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "Print the last N persisted conversation messages.",
         "history",
         "[n]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
+        "/assets",
+        "Manage buffered assets",
+        "List or remove non-document assets buffered for this chat.",
+        "paperclip",
+        "[list|rm <numbers|all>]",
         accepts_args=True,
     ),
     BuiltinCommandSpec(
@@ -280,6 +291,12 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
     session.clear()
     loop.sessions.save(session)
     loop.sessions.invalidate(session.key)
+    clear_pending_media = getattr(loop, "_clear_pending_media", None)
+    cleared_media = (
+        list(clear_pending_media(ctx.key))
+        if clear_pending_media is not None
+        else []
+    )
     if snapshot:
         runtime = ctx.runtime or loop.llm_runtime()
         loop._schedule_background(
@@ -289,11 +306,96 @@ async def cmd_new(ctx: CommandContext) -> OutboundMessage:
                 session_key=ctx.key,
             )
         )
+    content = "New session started."
+    if cleared_media:
+        content += f" Cleared {len(cleared_media)} buffered asset(s)."
     return OutboundMessage(
         channel=ctx.msg.channel, chat_id=ctx.msg.chat_id,
-        content="New session started.",
+        content=content,
         metadata=dict(ctx.msg.metadata or {})
     )
+
+
+_ASSETS_USAGE = "\n".join([
+    "素材缓冲管理：",
+    "`/assets list` — 查看当前素材",
+    "`/assets rm 1,2,3` — 按编号移除素材",
+    "`/assets rm all` — 清空全部素材",
+])
+_ASSET_INDICES_RE = re.compile(r"[+-]?\d+(?:\s*,\s*[+-]?\d+)*")
+
+
+def _assets_outbound(ctx: CommandContext, content: str) -> OutboundMessage:
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=content,
+        metadata={**dict(ctx.msg.metadata or {}), "render_as": "text"},
+    )
+
+
+async def cmd_assets(ctx: CommandContext) -> OutboundMessage:
+    """List or remove non-document media buffered for this session."""
+    _, automation_metadata = automation_history_overrides(ctx.msg.metadata)
+    if (
+        ctx.msg.channel == "system"
+        or ctx.msg.sender_id == "subagent"
+        or automation_metadata
+    ):
+        return _assets_outbound(ctx, "素材缓冲管理仅适用于用户消息。")
+
+    args = ctx.args.strip()
+    if not args:
+        return _assets_outbound(ctx, _ASSETS_USAGE)
+
+    if args.lower() == "list":
+        paths = ctx.loop._list_pending_media(ctx.key, refresh=True)
+        if not paths:
+            return _assets_outbound(ctx, "素材缓冲区为空。")
+        return _assets_outbound(
+            ctx,
+            f"当前共有 {len(paths)} 个素材：\n{format_media_list(paths)}",
+        )
+
+    action, separator, value = args.partition(" ")
+    if action.lower() != "rm" or not separator or not value.strip():
+        return _assets_outbound(ctx, _ASSETS_USAGE)
+    value = value.strip()
+
+    if value.lower() == "all":
+        removed = ctx.loop._clear_pending_media(ctx.key)
+        if not removed:
+            return _assets_outbound(ctx, "素材缓冲区为空。")
+        return _assets_outbound(ctx, f"已清空 {len(removed)} 个素材。")
+
+    current = ctx.loop._list_pending_media(ctx.key)
+    if not current:
+        return _assets_outbound(ctx, "素材缓冲区为空。")
+    if not _ASSET_INDICES_RE.fullmatch(value):
+        if any(not item.strip() for item in value.split(",")):
+            return _assets_outbound(ctx, _ASSETS_USAGE)
+        return _assets_outbound(
+            ctx,
+            f"编号无效；当前有效编号范围为 1-{len(current)}。\n{_ASSETS_USAGE}",
+        )
+
+    indices = {int(item.strip()) for item in value.split(",")}
+    if any(index <= 0 or index > len(current) for index in indices):
+        return _assets_outbound(
+            ctx,
+            f"编号无效；当前有效编号范围为 1-{len(current)}。\n{_ASSETS_USAGE}",
+        )
+
+    removed, remaining = ctx.loop._remove_pending_media(ctx.key, indices)
+    content = "已移除：\n" + format_media_list(removed)
+    if remaining:
+        content += (
+            f"\n\n剩余 {len(remaining)} 个素材：\n"
+            + format_media_list(remaining)
+        )
+    else:
+        content += "\n\n素材缓冲区为空。"
+    return _assets_outbound(ctx, content)
 
 
 def _format_preset_names(names: list[str]) -> str:
@@ -926,6 +1028,8 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/model ", cmd_model)
     router.exact("/history", cmd_history)
     router.prefix("/history ", cmd_history)
+    router.exact("/assets", cmd_assets)
+    router.prefix("/assets ", cmd_assets)
     router.exact("/goal", cmd_goal)
     router.prefix("/goal ", cmd_goal)
     router.exact("/trigger", cmd_trigger)

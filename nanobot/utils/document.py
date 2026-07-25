@@ -36,6 +36,14 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".webp",
 }
 
+DOCUMENT_EXTENSIONS: set[str] = SUPPORTED_EXTENSIONS - {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+}
+
 _MAX_TEXT_LENGTH = 200_000
 
 
@@ -248,6 +256,11 @@ def is_image_file(path: str) -> bool:
     if not mime:
         mime = mimetypes.guess_type(path)[0]
     return bool(mime and mime.startswith("image/"))
+
+
+def is_document_file(path: str) -> bool:
+    """Return whether *path* is a supported text-extractable document."""
+    return Path(path).suffix.lower() in DOCUMENT_EXTENSIONS
 
 
 def reference_non_image_attachments(

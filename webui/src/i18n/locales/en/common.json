@@ -932,6 +932,10 @@
             "title": "Show conversation history",
             "description": "Print the last N persisted conversation messages."
           },
+          "assets": {
+            "title": "Manage buffered assets",
+            "description": "List or remove non-document assets buffered for this chat."
+          },
           "dream": {
             "title": "Run Dream",
             "description": "Manually trigger memory consolidation."
