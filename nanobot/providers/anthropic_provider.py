@@ -323,6 +323,11 @@ class AnthropicProvider(LLMProvider):
                 if converted:
                     result.append(converted)
                 continue
+            if item.get("type") == "video_url":
+                converted = AnthropicProvider._convert_video_block(item)
+                if converted:
+                    result.append(converted)
+                continue
             if not item.get("type"):
                 # Anthropic requires every content block to declare a "type".
                 # A tool that returned a bare dict (or a list of dicts) lands
@@ -354,6 +359,23 @@ class AnthropicProvider(LLMProvider):
             }
         return {
             "type": "image",
+            "source": {"type": "url", "url": url},
+        }
+
+    @staticmethod
+    def _convert_video_block(block: dict[str, Any]) -> dict[str, Any] | None:
+        """Convert OpenAI video_url block to Anthropic video block."""
+        url = (block.get("video_url") or {}).get("url", "")
+        if not url:
+            return None
+        m = re.match(r"data:(video/\w+);base64,(.+)", url, re.DOTALL)
+        if m:
+            return {
+                "type": "video",
+                "source": {"type": "base64", "media_type": m.group(1), "data": m.group(2)},
+            }
+        return {
+            "type": "video",
             "source": {"type": "url", "url": url},
         }
 

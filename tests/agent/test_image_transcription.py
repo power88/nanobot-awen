@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from nanobot.agent.image_transcription import (
     IMAGE_TRANSCRIPTION_FAILURE_TEXT,
     ImageTranscriber,
-    ImageTranscriptionError,
     validate_image_transcription,
 )
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
@@ -143,25 +142,24 @@ def test_validate_text_and_json_transcriptions() -> None:
     assert structured["content"]["elements"][0]["text"] == "Nanobot"
 
 
-@pytest.mark.parametrize(
-    "raw",
-    [
-        "not json",
-        '{"description":"x","contentType":"text"}',
-        '{"description":"x","contentType":"markdown","content":"x"}',
-        '{"description":"x","contentType":"json","content":"not an object"}',
-        '{"description":"x","contentType":"json","content":{}}',
-    ],
-)
-def test_validate_rejects_invalid_outputs(raw: str) -> None:
-    with pytest.raises(ImageTranscriptionError):
-        validate_image_transcription(raw)
+def test_validate_falls_back_to_raw_text() -> None:
+    result = validate_image_transcription("not json")
+    assert result["contentType"] == "text"
+    assert result["content"] == "not json"
+
+
+def test_validate_empty_raw() -> None:
+    result = validate_image_transcription("")
+    assert result["contentType"] == "text"
+    assert result["content"] == ""
 
 
 @pytest.mark.asyncio
 async def test_presets_fall_back_and_duplicate_images_use_cache(monkeypatch) -> None:
     first = MagicMock()
-    first.chat_with_retry = AsyncMock(return_value=LLMResponse(content="invalid"))
+    first.chat_with_retry = AsyncMock(
+        return_value=LLMResponse(content="fail", finish_reason="error")
+    )
     second = MagicMock()
     second.chat_with_retry = AsyncMock(
         return_value=LLMResponse(content=_json_payload())

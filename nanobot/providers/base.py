@@ -603,9 +603,9 @@ class LLMProvider(ABC):
             if isinstance(content, list):
                 new_content = []
                 for b in content:
-                    if isinstance(b, dict) and b.get("type") == "image_url":
+                    if isinstance(b, dict) and b.get("type") in ("image_url", "video_url"):
                         placeholder = (
-                            "[Image not delivered to model — "
+                            "[Media not delivered to model — "
                             "do not describe or reference it]"
                         )
                         new_content.append({"type": "text", "text": placeholder})
@@ -620,7 +620,7 @@ class LLMProvider(ABC):
     @staticmethod
     def _has_image_content(messages: list[dict[str, Any]]) -> bool:
         return any(
-            isinstance(block, dict) and block.get("type") == "image_url"
+            isinstance(block, dict) and block.get("type") in ("image_url", "video_url")
             for message in messages
             for block in (
                 message.get("content")
@@ -667,9 +667,9 @@ class LLMProvider(ABC):
             content = msg.get("content")
             if isinstance(content, list):
                 for i, b in enumerate(content):
-                    if isinstance(b, dict) and b.get("type") == "image_url":
+                    if isinstance(b, dict) and b.get("type") in ("image_url", "video_url"):
                         placeholder = (
-                            "[Image not delivered to model — "
+                            "[Media not delivered to model — "
                             "do not describe or reference it]"
                         )
                         content[i] = {"type": "text", "text": placeholder}

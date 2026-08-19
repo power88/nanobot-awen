@@ -263,6 +263,32 @@ def is_document_file(path: str) -> bool:
     return Path(path).suffix.lower() in DOCUMENT_EXTENSIONS
 
 
+def is_video_file(path: str) -> bool:
+    """Check whether *path* looks like a video file.
+
+    Uses magic-byte detection (reads first 48 bytes) with a
+    ``mimetypes`` extension-based fallback.
+    """
+    from nanobot.utils.helpers import detect_video_mime
+
+    p = Path(path)
+    mime: str | None = None
+    if p.is_file():
+        try:
+            with p.open("rb") as f:
+                mime = detect_video_mime(f.read(48))
+        except OSError:
+            mime = None
+    if not mime:
+        mime = mimetypes.guess_type(path)[0]
+    return bool(mime and mime.startswith("video/"))
+
+
+def _is_visual(path: str) -> bool:
+    """Return True if *path* is an image or video file."""
+    return is_image_file(path) or is_video_file(path)
+
+
 def reference_non_image_attachments(
     content: str, media: list[str],
 ) -> tuple[str, list[str]]:
@@ -274,7 +300,7 @@ def reference_non_image_attachments(
     image_paths: list[str] = []
     attachment_refs: list[str] = []
     for path in media:
-        if is_image_file(path):
+        if _is_visual(path):
             image_paths.append(path)
         else:
             attachment_refs.append(f"[Attachment: {path}]")
@@ -290,10 +316,10 @@ def extract_documents(
     *,
     max_file_size: int = _MAX_EXTRACT_FILE_SIZE,
 ) -> tuple[str, list[str]]:
-    """Separate images from documents in *media_paths*.
+    """Separate images/videos from documents in *media_paths*.
 
     Documents (PDF, DOCX, XLSX, PPTX, plain-text, …) have their text
-    extracted and appended to *text*.  Only image paths are kept in the
+    extracted and appended to *text*.  Only image and video paths are kept in the
     returned list so that downstream layers only need to handle vision
     blocks.
 
@@ -319,7 +345,7 @@ def extract_documents(
             )
             continue
 
-        if is_image_file(path_str):
+        if _is_visual(path_str):
             image_paths.append(path_str)
         else:
             extracted = extract_text(p)

@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import os
 import re
+import shutil
 import time
 from collections.abc import Mapping
 from contextlib import AbstractContextManager, ExitStack, nullcontext, suppress
@@ -1799,9 +1800,47 @@ class AgentLoop:
         return "ok"
 
     def _prepare_message_media(self, content: str, media: list[str]) -> tuple[str, list[str]]:
+        self._copy_media_to_assets(media)
+
         if self._should_extract_document_text():
-            return extract_documents(content, media)
-        return reference_non_image_attachments(content, media)
+            content, media_paths = extract_documents(content, media)
+        else:
+            content, media_paths = reference_non_image_attachments(content, media)
+
+        # If there are non-visual files copied to assets, let the agent know
+        from nanobot.utils.document import _is_visual
+
+        assets_dir = self.workspace / ".nanobot" / "assets"
+        non_visual = sum(1 for p in media if Path(p).is_file() and not _is_visual(p))
+        if non_visual > 0:
+            content = (
+                content
+                + f"\n\n[素材文件位于: {assets_dir} — 使用 read_file 读取原始文件]"
+            )
+
+        return content, media_paths
+
+    def _copy_media_to_assets(self, media: list[str]) -> None:
+        """Copy media files to workspace .nanobot/assets/ for agent file-tool access."""
+        assets_dir = self.workspace / ".nanobot" / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        for path_str in media:
+            p = Path(path_str)
+            if not p.is_file():
+                continue
+            dest = assets_dir / p.name
+            # ponytail: O(n) dedup; fine for typical 1-4 files per message
+            if dest.exists():
+                stem = p.stem
+                suffix = p.suffix
+                counter = 1
+                while dest.exists():
+                    dest = assets_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+            try:
+                shutil.copy2(p, dest)
+            except OSError:
+                continue
 
     def _should_extract_document_text(self) -> bool:
         if self.channels_config is None:

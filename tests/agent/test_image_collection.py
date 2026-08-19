@@ -48,11 +48,14 @@ async def test_attachment_messages_accumulate_and_ack(loop_factory, tmp_path) ->
     first_ack = await loop.bus.consume_outbound()
     second_ack = await loop.bus.consume_outbound()
     assert first_ack.content == (
-        "已添加 1 个附件，发送附件继续添加\n当前附件列表:\n1. first.png"
+        "已添加 1 个附件，发送附件继续添加"
+        "\n当前附件列表:\n1. first.png"
+        "\n使用`/assets`管理附件"
     )
     assert second_ack.content == (
         "已添加 2 个附件，发送附件继续添加"
         "\n当前附件列表:\n1. first.png\n2. second.mp4"
+        "\n使用`/assets`管理附件"
     )
     assert second_ack.metadata == {"request_id": "req-1"}
 
@@ -216,6 +219,7 @@ async def test_run_routes_collection_before_agent_dispatch(loop_factory, tmp_pat
         assert ack.content == (
             "已添加 1 个附件，发送附件继续添加"
             "\n当前附件列表:\n1. pending.png"
+            "\n使用`/assets`管理附件"
         )
         loop._dispatch.assert_not_awaited()
 

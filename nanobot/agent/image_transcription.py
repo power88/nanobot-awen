@@ -10,6 +10,8 @@ from collections.abc import MutableMapping
 from typing import Any
 from urllib.parse import unquote_to_bytes
 
+import re
+
 from loguru import logger
 
 from nanobot.config.schema import Config
@@ -66,37 +68,33 @@ Keep all coordinates inside the image bounds. Do not infer hidden content.
 Return exactly the JSON object and nothing else."""
 
 IMAGE_TRANSCRIPTION_FAILURE_TEXT = (
-    "图片不可用。请明确告知用户：“我目前无法查看这张图片，"
-    "图片转写功能似乎出现了问题。”"
+    "图片不可用。请明确告知用户：“我目前无法查看这张图片，图片转写功能似乎出现了问题。”"
 )
-_TRANSCRIPTION_KEYS = frozenset({"description", "contentType", "content"})
 
 
 class ImageTranscriptionError(ValueError):
     """The vision model returned an invalid transcription."""
 
 
+_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+
+
 def validate_image_transcription(raw: str | None) -> dict[str, Any]:
-    """Validate the JSON transcription contract."""
+    """Loosely parse the JSON transcription, falling back to raw text."""
+    text = (raw or "").strip()
+    if m := _FENCE_RE.fullmatch(text):
+        text = m.group(1).strip()
+    if not text.startswith("{"):
+        if m := _FENCE_RE.search(text):
+            text = m.group(1).strip()
     try:
-        value = json.loads(raw or "")
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ImageTranscriptionError("response is not valid JSON") from exc
-    if not isinstance(value, dict) or set(value) != _TRANSCRIPTION_KEYS:
-        raise ImageTranscriptionError("response must contain exactly the required fields")
-    if not isinstance(value["description"], str) or not value["description"].strip():
-        raise ImageTranscriptionError("description must not be empty")
-    content_type = value["contentType"]
-    content = value["content"]
-    if content_type == "text":
-        if not isinstance(content, str) or not content.strip():
-            raise ImageTranscriptionError("text content must be a non-empty string")
-    elif content_type == "json":
-        if not isinstance(content, dict) or not content:
-            raise ImageTranscriptionError("json content must be a non-empty object")
-    else:
-        raise ImageTranscriptionError("contentType must be 'json' or 'text'")
-    return value
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    except (TypeError, json.JSONDecodeError):
+        pass
+    # JSON parsing failed — wrap raw text so the LLM can still use it
+    return {"description": "", "contentType": "text", "content": text}
 
 
 class ImageTranscriber:
@@ -112,16 +110,25 @@ class ImageTranscriber:
         messages: list[dict[str, Any]],
         cache: MutableMapping[str, str],
     ) -> bool:
-        """Replace every image block, returning whether any image was found."""
+        """Replace every image/video block, returning whether any was found."""
         found = False
         for message in messages:
             content = message.get("content")
             if not isinstance(content, list):
                 continue
             for index, block in enumerate(content):
-                if not isinstance(block, dict) or block.get("type") != "image_url":
+                if not isinstance(block, dict) or block.get("type") not in (
+                    "image_url",
+                    "video_url",
+                ):
                     continue
                 found = True
+                if block.get("type") == "video_url":
+                    content[index] = {
+                        "type": "text",
+                        "text": "[Video not delivered to model — do not describe or reference it]",
+                    }
+                    continue
                 replacement = await self._replacement_for_block(block, cache)
                 content[index] = {"type": "text", "text": replacement}
         return found
@@ -192,8 +199,8 @@ class ImageTranscriber:
                     messages=messages,
                     tools=None,
                     model=preset.model,
-                    temperature=preset.temperature,
-                    max_tokens=preset.max_tokens,
+                    temperature=0.1,
+                    max_tokens=32000,
                     reasoning_effort=preset.reasoning_effort,
                     allow_image_stripping=False,
                 )

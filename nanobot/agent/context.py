@@ -21,6 +21,7 @@ from nanobot.runtime_context import (
 )
 from nanobot.utils.helpers import (
     detect_image_mime,
+    detect_video_mime,
     load_bundled_template,
     truncate_text_to_tokens,
 )
@@ -220,26 +221,33 @@ class ContextBuilder:
         return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+        """Build user message content with optional base64-encoded images and videos."""
         if not media:
             return text
 
-        images = []
+        blocks = []
         for path in media:
             p = Path(path)
             if not p.is_file():
                 continue
             raw = p.read_bytes()
-            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
-            if not mime or not mime.startswith("image/"):
+            mime = detect_image_mime(raw) or detect_video_mime(raw) or mimetypes.guess_type(path)[0]
+            if not mime:
                 continue
             b64 = base64.b64encode(raw).decode()
-            images.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-                "_meta": {"path": str(p)},
-            })
+            if mime.startswith("image/"):
+                blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    "_meta": {"path": str(p)},
+                })
+            elif mime.startswith("video/"):
+                blocks.append({
+                    "type": "video_url",
+                    "video_url": {"url": f"data:{mime};base64,{b64}"},
+                    "_meta": {"path": str(p)},
+                })
 
-        if not images:
+        if not blocks:
             return text
-        return images + [{"type": "text", "text": text}]
+        return blocks + [{"type": "text", "text": text}]

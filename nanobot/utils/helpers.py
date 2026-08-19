@@ -248,6 +248,26 @@ def detect_image_mime(data: bytes) -> str | None:
     return None
 
 
+def detect_video_mime(data: bytes) -> str | None:
+    """Detect video MIME type from magic bytes, ignoring file extension."""
+    if len(data) < 12:
+        return None
+    # ISO Base Media (MP4, MOV, 3GP): 'ftyp' at offset 4
+    if data[4:8] == b"ftyp":
+        if data[8:12] == b"qt  ":
+            return "video/quicktime"
+        return "video/mp4"
+    # EBML (WebM, MKV)
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        if b"webm" in data[:48]:
+            return "video/webm"
+        return "video/x-matroska"
+    # AVI (RIFF container)
+    if data[:4] == b"RIFF" and data[8:12] == b"AVI ":
+        return "video/avi"
+    return None
+
+
 def build_image_content_blocks(
     raw: bytes, mime: str, path: str, label: str
 ) -> list[dict[str, Any]]:

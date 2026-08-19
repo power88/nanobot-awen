@@ -1,4 +1,5 @@
 """Configuration schema using Pydantic."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -32,10 +33,16 @@ class ChannelsConfig(Base):
     send_progress: bool = True  # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     show_reasoning: bool = True  # surface model reasoning when channel implements it
-    extract_document_text: bool = True  # extract text from document attachments before sending to the model
-    send_max_retries: int = Field(default=3, ge=0, le=10)  # Max delivery attempts (initial send included)
+    extract_document_text: bool = (
+        True  # extract text from document attachments before sending to the model
+    )
+    send_max_retries: int = Field(
+        default=3, ge=0, le=10
+    )  # Max delivery attempts (initial send included)
     transcription_provider: str = "groq"  # Deprecated: use top-level transcription.provider
-    transcription_language: str | None = Field(default=None, pattern=r"^[a-z]{2,3}$")  # Deprecated: use top-level transcription.language
+    transcription_language: str | None = Field(
+        default=None, pattern=r"^[a-z]{2,3}$"
+    )  # Deprecated: use top-level transcription.language
 
 
 class TranscriptionConfig(Base):
@@ -110,6 +117,7 @@ class ModelPresetConfig(Base):
 
     def to_generation_settings(self) -> Any:
         from nanobot.providers.base import GenerationSettings
+
         return GenerationSettings(
             temperature=self.temperature,
             max_tokens=self.max_tokens,
@@ -143,13 +151,19 @@ class AgentDefaults(Base):
         validation_alias=AliasChoices("toolHintMaxLength"),
         serialization_alias="toolHintMaxLength",
     )  # Max characters for tool hint display (e.g. "$ cd …/project && npm test")
-    reasoning_effort: str | None = None  # low / medium / high / adaptive / none — LLM thinking effort; None preserves the provider default
+    reasoning_effort: str | None = (
+        None  # low / medium / high / adaptive / none — LLM thinking effort; None preserves the provider default
+    )
     supports_vision: bool = True
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
     bot_name: str = "nanobot"  # Display name shown in CLI prompts (e.g. "{name} is thinking...")
     bot_icon: str = "🐈"  # Short icon (emoji or text) shown next to the bot name in CLI; "" to omit
-    unified_session: bool = False  # Share one session across all channels (single-user multi-device)
-    disabled_skills: list[str] = Field(default_factory=list)  # Skill names to exclude from loading (e.g. ["summarize", "skill-creator"])
+    unified_session: bool = (
+        False  # Share one session across all channels (single-user multi-device)
+    )
+    disabled_skills: list[str] = Field(
+        default_factory=list
+    )  # Skill names to exclude from loading (e.g. ["summarize", "skill-creator"])
     session_ttl_minutes: int = Field(
         default=15,
         ge=0,
@@ -188,8 +202,12 @@ class ProviderConfig(Base):
     api_base: str | None = None
     api_type: Literal["auto", "chat_completions", "responses"] = "auto"  # Request API surface
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
-    extra_body: dict[str, Any] | None = None  # Extra provider request fields; shape depends on provider/API surface
-    extra_query: dict[str, str] | None = None  # Extra query params (e.g. api-version for Azure-style gateways)
+    extra_body: dict[str, Any] | None = (
+        None  # Extra provider request fields; shape depends on provider/API surface
+    )
+    extra_query: dict[str, str] | None = (
+        None  # Extra query params (e.g. api-version for Azure-style gateways)
+    )
     proxy: str | None = None  # OpenAI-compatible/Codex HTTP proxy URL
     thinking_style: str | None = None  # Thinking/reasoning style for custom providers
 
@@ -233,12 +251,18 @@ class ProvidersConfig(Base):
     model_config = ConfigDict(extra="allow")
 
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
-    azure_openai: ProviderConfig = Field(default_factory=ProviderConfig)  # Azure OpenAI (model = deployment name)
-    bedrock: BedrockProviderConfig = Field(default_factory=BedrockProviderConfig)  # AWS Bedrock Converse
+    azure_openai: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # Azure OpenAI (model = deployment name)
+    bedrock: BedrockProviderConfig = Field(
+        default_factory=BedrockProviderConfig
+    )  # AWS Bedrock Converse
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
-    assemblyai: ProviderConfig = Field(default_factory=ProviderConfig)  # AssemblyAI voice transcription
+    assemblyai: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # AssemblyAI voice transcription
     huggingface: ProviderConfig = Field(default_factory=ProviderConfig)
     skywork: ProviderConfig = Field(default_factory=ProviderConfig)  # Skywork / APIFree API gateway
     deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -252,11 +276,17 @@ class ProvidersConfig(Base):
     ovms: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenVINO Model Server (OVMS)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
-    kimi_coding: ProviderConfig = Field(default_factory=ProviderConfig)  # Kimi Coding Plan (Anthropic Messages API)
+    kimi_coding: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # Kimi Coding Plan (Anthropic Messages API)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
-    minimax_anthropic: ProviderConfig = Field(default_factory=ProviderConfig)  # MiniMax Anthropic endpoint (thinking)
+    minimax_anthropic: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # MiniMax Anthropic endpoint (thinking)
     mistral: ProviderConfig = Field(default_factory=ProviderConfig)
-    stepfun: ProviderConfig = Field(default_factory=ProviderConfig)  # Step Fun (阶跃星辰) — LLM + ASR (set apiBase to Plan URL for ASR)
+    stepfun: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # Step Fun (阶跃星辰) — LLM + ASR (set apiBase to Plan URL for ASR)
     xiaomi_mimo: ProviderConfig = Field(default_factory=ProviderConfig)  # Xiaomi MIMO (小米)
     longcat: ProviderConfig = Field(default_factory=ProviderConfig)  # LongCat
     ant_ling: ProviderConfig = Field(default_factory=ProviderConfig)  # Ant Ling
@@ -264,16 +294,32 @@ class ProvidersConfig(Base):
     siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动)
     novita: ProviderConfig = Field(default_factory=ProviderConfig)  # Novita AI
     volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎)
-    volcengine_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine Coding Plan
-    byteplus: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus (VolcEngine international)
-    byteplus_coding_plan: ProviderConfig = Field(default_factory=ProviderConfig)  # BytePlus Coding Plan
-    openai_codex: ProviderConfig = Field(default_factory=ProviderConfig, exclude=True)  # OpenAI Codex (OAuth)
-    github_copilot: ProviderConfig = Field(default_factory=ProviderConfig, exclude=True)  # Github Copilot (OAuth)
+    volcengine_coding_plan: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # VolcEngine Coding Plan
+    byteplus: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # BytePlus (VolcEngine international)
+    byteplus_coding_plan: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # BytePlus Coding Plan
+    openai_codex: ProviderConfig = Field(
+        default_factory=ProviderConfig, exclude=True
+    )  # OpenAI Codex (OAuth)
+    github_copilot: ProviderConfig = Field(
+        default_factory=ProviderConfig, exclude=True
+    )  # Github Copilot (OAuth)
     qianfan: ProviderConfig = Field(default_factory=ProviderConfig)  # Qianfan (百度千帆)
     nvidia: ProviderConfig = Field(default_factory=ProviderConfig)  # NVIDIA NIM (nvapi- keys)
-    opencode: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenCode Zen (canonical provider id)
-    opencode_zen: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenCode Zen (curated coding models)
-    opencode_go: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenCode Go (low-cost coding models)
+    opencode: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # OpenCode Zen (canonical provider id)
+    opencode_zen: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # OpenCode Zen (curated coding models)
+    opencode_go: ProviderConfig = Field(
+        default_factory=ProviderConfig
+    )  # OpenCode Go (low-cost coding models)
 
     @model_validator(mode="after")
     def convert_extra_providers(self):
@@ -353,12 +399,15 @@ class MCPServerConfig(Base):
     url: str = ""  # HTTP/SSE: endpoint URL
     headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
     tool_timeout: int = 30  # seconds before a tool call is cancelled
-    enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all capabilities (tools, resources, prompts); any restriction = only listed tools, no resources/prompts
+    enabled_tools: list[str] = Field(
+        default_factory=lambda: ["*"]
+    )  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all capabilities (tools, resources, prompts); any restriction = only listed tools, no resources/prompts
 
 
 def _lazy_default(module_path: str, class_name: str) -> Any:
     """Deferred import helper for ToolsConfig default factories."""
     import importlib
+
     module = importlib.import_module(module_path)
     return getattr(module, class_name)()
 
@@ -371,15 +420,29 @@ class ToolsConfig(Base):
     tool implementations.
     """
 
-    web: WebToolsConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.web", "WebToolsConfig"))
-    exec: ExecToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.shell", "ExecToolConfig"))
-    file: FileToolsConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.filesystem", "FileToolsConfig"))
-    cli_apps: CliAppsToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.cli_apps", "CliAppsToolConfig"))
-    my: MyToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.self", "MyToolConfig"))
-    image_generation: ImageGenerationToolConfig = Field(
-        default_factory=lambda: _lazy_default("nanobot.agent.tools.image_generation", "ImageGenerationToolConfig"),
+    web: WebToolsConfig = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.tools.web", "WebToolsConfig")
     )
-    restrict_to_workspace: bool = False  # policy intent: keep tool access inside workspace when possible
+    exec: ExecToolConfig = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.tools.shell", "ExecToolConfig")
+    )
+    file: FileToolsConfig = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.tools.filesystem", "FileToolsConfig")
+    )
+    cli_apps: CliAppsToolConfig = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.tools.cli_apps", "CliAppsToolConfig")
+    )
+    my: MyToolConfig = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.tools.self", "MyToolConfig")
+    )
+    image_generation: ImageGenerationToolConfig = Field(
+        default_factory=lambda: _lazy_default(
+            "nanobot.agent.tools.image_generation", "ImageGenerationToolConfig"
+        ),
+    )
+    restrict_to_workspace: bool = (
+        False  # policy intent: keep tool access inside workspace when possible
+    )
     webui_allow_local_service_access: bool = Field(
         default=True,
         validation_alias=AliasChoices(
@@ -397,7 +460,9 @@ class ToolsConfig(Base):
         ),
     )  # allow non-local WebUI clients to install optional Python packages
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
-    ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
+    ssrf_whitelist: list[str] = Field(
+        default_factory=list
+    )  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
 
 
 class Config(BaseSettings):
@@ -438,9 +503,7 @@ class Config(BaseSettings):
                 raise ValueError(f"fallback_models entry {fallback!r} not found in model_presets")
         if self.image_transcription.enabled:
             if not self.image_transcription.model_presets:
-                raise ValueError(
-                    "image_transcription.model_presets must not be empty when enabled"
-                )
+                raise ValueError("image_transcription.model_presets must not be empty when enabled")
             for preset_name in self.image_transcription.model_presets:
                 preset = self.model_presets.get(preset_name)
                 if preset is None:
@@ -450,8 +513,7 @@ class Config(BaseSettings):
                     )
                 if not preset.supports_vision:
                     raise ValueError(
-                        f"image_transcription model preset {preset_name!r} "
-                        "must support vision"
+                        f"image_transcription model preset {preset_name!r} must support vision"
                     )
         return self
 
@@ -459,9 +521,12 @@ class Config(BaseSettings):
         """Return the implicit `default` preset from agents.defaults fields."""
         d = self.agents.defaults
         return ModelPresetConfig(
-            model=d.model, provider=d.provider, max_tokens=d.max_tokens,
+            model=d.model,
+            provider=d.provider,
+            max_tokens=d.max_tokens,
             context_window_tokens=d.context_window_tokens,
-            temperature=d.temperature, reasoning_effort=d.reasoning_effort,
+            temperature=d.temperature,
+            reasoning_effort=d.reasoning_effort,
             supports_vision=d.supports_vision,
         )
 
@@ -480,7 +545,8 @@ class Config(BaseSettings):
         return Path(self.agents.defaults.workspace).expanduser()
 
     def _match_provider(
-        self, model: str | None = None,
+        self,
+        model: str | None = None,
         *,
         preset: ModelPresetConfig | None = None,
     ) -> tuple["ProviderConfig | None", str | None]:
